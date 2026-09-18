@@ -51,7 +51,7 @@ process. So the app doesn't latch the flag — it holds a **lease** it must keep
 | Battery floor | Turns off at 5–50% on battery (default 15%). Beats a deliberate turn-on. |
 | Low Power Mode | Steps aside when LPM is on and discharging, unless you deliberately turned it on. |
 | Auto-off timer | 1h / 2h wall-clock ceiling, live countdown. Retries if the privileged call fails. |
-| Idle timeout | Off by default. Stops N minutes after the last Claude Code tool call. |
+| Idle timeout | Off by default. Stops N minutes after the last **Claude Code** tool call. |
 | Lid close | Puts the built-in display to sleep, so a closed laptop isn't lit, hot and unlocked. |
 | Crash / force-quit | A watchdog outside the app clears the flag within ~2.5 min. **The dead man's switch.** |
 | Reboot | macOS resets `disablesleep` to 0. |
@@ -67,6 +67,11 @@ rather than announcing a turn-off that never happened.
 - **Lid-close display sleep is untested on hardware.** Verify before trusting it in a bag.
 
 ## Claude Code integration
+
+> This feature knows about **Claude Code specifically** — nothing else. It counts tool calls
+> reported by a Claude Code hook, and has no idea whether any other agent or long-running job
+> is working. For those, use the auto-off timer.
+
 
 The point of the idle timeout: keep the Mac awake exactly as long as Claude is working, with
 no timer to guess at. One hook does it — in `~/.claude/settings.json` for every session on

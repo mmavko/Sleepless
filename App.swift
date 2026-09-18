@@ -208,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastExternalExtend: Date?       // last time someone ELSE pushed the lease out
     private var lastSelfWrittenExpiry = 0       // so we can tell our own renewal from a hook's
     private var watchdogIsLoaded = false        // cached; launchctl is not free enough for renderText
+    private var hookIsInstalled = false         // cached alongside it, for the same reason
     private var armedWithoutWatchdog = false    // user's explicit per-session override
     private var clamshellToken: Int32 = NOTIFY_TOKEN_INVALID
     private var lidClosed = false
@@ -341,7 +342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Same card because it answers the same question — when does this end? The timer is a
         // wall-clock ceiling; this one bounds IDLENESS. Neither replaces the other: without the
         // ceiling, a session that keeps calling tools holds the Mac awake indefinitely on AC.
-        let idleLabel = makeLabel("Stop after no tool calls", font: .systemFont(ofSize: 13), color: .labelColor)
+        let idleLabel = makeLabel("Stop when Claude Code goes idle", font: .systemFont(ofSize: 13), color: .labelColor)
         idleLabel.frame = NSRect(x: ci, y: ci + 58, width: cw, height: 18)
         g2.addSubview(idleLabel)
         idleControl = NSSegmentedControl(labels: idleChoices.map { $0 == 0 ? "Off" : "\($0)m" },
@@ -429,7 +430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
-        if keepAwakeTimer != nil { startCountdownTicker() }
+        if keepAwakeTimer != nil || idleSecondsRemaining() != nil { startCountdownTicker() }
         updateCountdownLabel()
         // Close when the user clicks anywhere outside the app (status bar, another app, desktop).
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -634,7 +635,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                selector: #selector(countdownTick), userInfo: nil, repeats: true)
     }
 
-    @objc private func countdownTick() { updateCountdownLabel() }
+    @objc private func countdownTick() {
+        updateCountdownLabel()
+        idleHintLabel?.stringValue = idleHintText()   // the idle countdown ticks too
+    }
+
+    // Seconds until the idle timeout turns keep-awake off, or nil when it can't fire.
+    private func idleSecondsRemaining() -> Int? {
+        guard idleTimeoutMinutes > 0, isOn, let since = lastExternalExtend ?? armedAt else { return nil }
+        let remaining = Double(idleTimeoutMinutes * 60) - Date().timeIntervalSince(since)
+        return remaining > 0 ? Int(remaining.rounded()) : 0
+    }
+
+    // One line carrying the three things worth knowing: whether the hook is wired up at all,
+    // when Claude Code last did something, and how long until this turns itself off.
+    private func idleHintText() -> String {
+        if idleTimeoutMinutes == 0 {
+            return "Off — a wall-clock timer, not Claude Code activity."
+        }
+        if !hookIsInstalled {
+            return "⚠️ No Claude Code hook found — run ./sleepless hook"
+        }
+        guard let remaining = idleSecondsRemaining() else {
+            return "Counts Claude Code tool calls, subagents included."
+        }
+        let countdown = String(format: "%d:%02d", remaining / 60, remaining % 60)
+        guard let last = lastExternalExtend else {
+            return "No tool calls yet — sleeping in \(countdown)"
+        }
+        let ago = Int(Date().timeIntervalSince(last))
+        let agoText = ago < 60 ? "just now" : "\(ago / 60) min ago"
+        return "Last tool call \(agoText) — sleeping in \(countdown)"
+    }
 
     private func updateCountdownLabel() {
         guard let end = timerEndDate, isOn else { countdownLabel?.stringValue = ""; return }
@@ -663,6 +695,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func refresh() {
         ensureStatusItemVisible()
         refreshWatchdogState()
+        refreshHookState()
         let on = readSleepDisabled()
         applyUI(on: on)
         if on { enforceSafetyNets() }
@@ -704,20 +737,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Update text labels only (no pmset subprocess; safe to call on every slider tick).
     private func renderText() {
         floorValueLabel?.stringValue = "\(batteryFloorPercent)%"
-        // Doubles as the only way to tell whether the hook is actually wired up: if this keeps
-        // saying "no tool calls seen", the PreToolUse hook isn't reaching `sleepless extend`.
-        if idleTimeoutMinutes == 0 {
-            idleHintLabel?.stringValue = "Off. Needs the Claude Code PreToolUse hook — see README."
-        } else if let last = lastExternalExtend {
-            let minutes = Int(Date().timeIntervalSince(last) / 60)
-            idleHintLabel?.stringValue = minutes < 1
-                ? "Last tool call: just now."
-                : "Last tool call: \(minutes) min ago."
-        } else if isOn {
-            idleHintLabel?.stringValue = "No tool calls seen yet — is the hook installed?"
-        } else {
-            idleHintLabel?.stringValue = "Counts from the last `sleepless extend` by a hook."
-        }
+        idleHintLabel?.stringValue = idleHintText()
         if !watchdogIsLoaded {
             captionLabel?.stringValue = isOn
                 ? "⚠️ No watchdog: if Sleepless quits, your Mac stays awake until you reboot."
@@ -885,6 +905,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         extendLease()
+    }
+
+    // Is a Claude Code PreToolUse hook actually calling `sleepless extend`? Without one the
+    // idle timeout has nothing to count and would turn keep-awake off on schedule however hard
+    // Claude is working — and no step in that sequence looks like an error. Mirrors the CLI's
+    // `sleepless hook`. User-level settings only: project-level ones live in whatever repo you
+    // are in, so a negative here is a warning, never a verdict.
+    private func refreshHookState() {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        hookIsInstalled = [".claude/settings.json", ".claude/settings.local.json"]
+            .map { home.appendingPathComponent($0) }
+            .contains { url in
+                guard let data = try? Data(contentsOf: url),
+                      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let hooks = root["hooks"] as? [String: Any],
+                      let entries = hooks["PreToolUse"] as? [[String: Any]] else { return false }
+                for entry in entries {
+                    for hook in (entry["hooks"] as? [[String: Any]]) ?? [] {
+                        var command = (hook["command"] as? String) ?? ""
+                        for arg in (hook["args"] as? [Any]) ?? [] { command += " \(arg)" }
+                        if command.contains("sleepless"), command.contains("extend") { return true }
+                    }
+                }
+                return false
+            }
     }
 
     // Is the dead-man switch actually running? Cheap enough per poll, too expensive for
