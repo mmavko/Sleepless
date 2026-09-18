@@ -303,9 +303,25 @@ esac
 printf 'not json\n{ broken\n' >> "$JFILE"
 if report >/dev/null 2>&1; then ok "malformed lines     -> survives" ; else bad "malformed journal crashed the report"; fi
 
-# Rotation keeps one generation; the report must read both.
+# Summaries are the corpus and are NEVER rotated by the app; the report still tolerates a .1
+# if one exists, so an older journal is not silently dropped.
 mv "$JFILE" "$JFILE.1"; : > "$JFILE"
-case "$(report)" in *"sessions recorded: 1"*) ok "rotated .1 file     -> included" ;; *) bad "rotated journal not read"; esac
+case "$(report)" in *"sessions recorded: 1"*) ok "legacy .1 file      -> still read" ;; *) bad "rotated journal not read"; esac
+rm -f "$JFILE.1"
+
+# The corpus must not be capped. A size cap would discard the oldest sessions first, and the
+# rare one that cooked in a bag is exactly the one worth keeping.
+if grep -q "summariesRelativePath" "$REPO/App.swift" &&
+   ! grep -E "rotate.*[Ss]ummar" "$REPO/App.swift" >/dev/null; then
+  ok "summaries stream is never rotated"
+else
+  bad "summaries appear to be size-capped — the corpus would lose its oldest sessions"
+fi
+if grep -q "samplesMaxBytes" "$REPO/App.swift"; then
+  ok "samples stream is capped separately"
+else
+  bad "no cap on the bulky sample stream"
+fi
 
 # The summary keys are written by App.swift and read by the report: a rename on one side
 # would silently produce an empty or wrong analysis. Same contract class as boot time.

@@ -63,8 +63,20 @@ private let idleChoices = [0, 10, 20, 60]
 // threshold is worse than none: it trips when it shouldn't and lends false confidence when it
 // doesn't. So this records what actually happens during keep-awake sessions and reports
 // afterwards, until there is enough real data to set thresholds from measurement.
-private let journalRelativePath = "Library/Application Support/Sleepless/sessions.jsonl"
-private let journalMaxBytes = 2 * 1024 * 1024
+// Two streams, because they have completely different lifetimes. The SUMMARIES are the
+// corpus — one line per session, a few hundred bytes, and the whole reason this exists. They
+// are never rotated: the rare session that cooked in a bag is precisely what a size cap would
+// discard first, which would defeat the point. The per-minute SAMPLES are the bulk (~115 bytes
+// each, so ~10 MB/year at 4h/day) and only matter for recent detail, so they rotate.
+private let summariesRelativePath = "Library/Application Support/Sleepless/sessions.jsonl"
+private let samplesRelativePath = "Library/Application Support/Sleepless/samples.jsonl"
+private let samplesMaxBytes = 20 * 1024 * 1024   // ~2 years of samples at 4h/day
+
+// A critical-heat event outlives its notification: you may well have been away from the Mac
+// when it fired. It stays in the popover for a day, then ages out on its own.
+private let criticalAtKey = "lastCriticalAt"
+private let criticalLidClosedKey = "lastCriticalLidClosed"
+private let criticalWarningTTL: TimeInterval = 24 * 60 * 60
 
 // Battery-floor config (user-adjustable via the popover slider; persisted in UserDefaults).
 private let floorKey = "batteryFloorPercent"
@@ -768,7 +780,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func renderText() {
         floorValueLabel?.stringValue = "\(batteryFloorPercent)%"
         idleHintLabel?.stringValue = idleHintText()
-        if !watchdogIsLoaded {
+        // Heat that already happened outranks a risk that might: it is the only one of these
+        // the user may have missed entirely.
+        if let critical = recentCriticalWarning() {
+            captionLabel?.stringValue = critical
+        } else if !watchdogIsLoaded {
             captionLabel?.stringValue = isOn
                 ? "⚠️ No watchdog: if Sleepless quits, your Mac stays awake until you reboot."
                 : "⚠️ Watchdog not running. Install it: ./watchdog-agent.sh install"
@@ -856,8 +872,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let lowPower: Bool
     }
 
-    private var journalURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(journalRelativePath)
+    private var summariesURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(summariesRelativePath)
+    }
+    private var samplesURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(samplesRelativePath)
+    }
+
+    // A critical-heat event, while it is still recent enough to act on. The notification fires
+    // once, in the moment — but the whole point of this app is that you are not at the Mac, so
+    // the event has to still be visible when you come back. Ages out on its own after a day.
+    private func recentCriticalWarning() -> String? {
+        let at = UserDefaults.standard.double(forKey: criticalAtKey)
+        guard at > 0 else { return nil }
+        let age = Date().timeIntervalSince1970 - at
+        guard age < criticalWarningTTL else { return nil }
+        let lidClosed = UserDefaults.standard.bool(forKey: criticalLidClosedKey)
+        let when = age < 3600 ? "\(max(1, Int(age / 60))) min ago" : "\(Int(age / 3600))h ago"
+        return "⚠️ Critical heat \(when)\(lidClosed ? ", lid closed" : ""). Run: sleepless report"
     }
 
     private func thermalName(_ state: ProcessInfo.ThermalState) -> String {
@@ -890,11 +922,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                       lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
     }
 
-    private func appendJournal(_ fields: [String: Any]) {
+    private func appendJournal(_ fields: [String: Any], to url: URL) {
         guard let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
               var line = String(data: data, encoding: .utf8) else { return }
         line += "\n"
-        let url = journalURL
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
@@ -910,12 +941,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // Keep the corpus from growing without bound. One generation back is plenty: this is for
-    // spotting patterns, not for audit.
-    private func rotateJournalIfNeeded() {
-        let url = journalURL
+    // Only the SAMPLE stream is capped. Summaries are never rotated — see the note above.
+    private func rotateSamplesIfNeeded() {
+        let url = samplesURL
         guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
-              size > journalMaxBytes else { return }
+              size > samplesMaxBytes else { return }
         let rolled = url.appendingPathExtension("1")
         try? FileManager.default.removeItem(at: rolled)
         try? FileManager.default.moveItem(at: url, to: rolled)
@@ -936,18 +966,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessionSamples.append(sample)
         var fields = sampleFields(sample)
         fields["ev"] = event
-        appendJournal(fields)
+        appendJournal(fields, to: samplesURL)
 
         // The one thing worth saying in the moment rather than afterwards: at .critical the
         // machine is already in trouble, and a post-mortem is too late to be useful.
         if sample.thermal == .critical, !warnedCriticalThisSession {
             warnedCriticalThisSession = true
+            // A notification you were not there to see is lost, so the event is also recorded
+            // where it will still be visible tomorrow.
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: criticalAtKey)
+            UserDefaults.standard.set(sample.lidClosed, forKey: criticalLidClosedKey)
             notify("Thermal state is CRITICAL while keeping awake. Consider turning Sleepless off.")
+            renderText()
         }
     }
 
     private func beginJournalSession() {
-        rotateJournalIfNeeded()
+        rotateSamplesIfNeeded()
         sessionStart = Date()
         sessionSamples = []
         warnedCriticalThisSession = false
@@ -983,7 +1018,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "batteryStart": batteries.first ?? -1,
             "batteryEnd": batteries.last ?? -1,
             "batteryDropPct": drop,
-        ])
+        ], to: summariesURL)
 
         // The risky shape is heat with the lid CLOSED — on a desk with the lid open, a warm
         // Mac is just a working Mac. Report that combination, not heat on its own.
@@ -1292,7 +1327,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Notification (mirrors Nexus' osascript approach)
     private func notify(_ message: String) {
-        let script = "display notification \"\(message)\" with title \"Sleepless\" sound name \"Tink\""
+        // Escape for the AppleScript string literal. These messages are app-built, not user
+        // input, so this is not a security hole — but it is the same interpolation pattern this
+        // fork deleted from the privilege-setup path, and messages now carry generated text
+        // (thermal names, safety-net reasons), so a stray quote would silently drop the alert.
+        let escaped = message
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "display notification \"\(escaped)\" with title \"Sleepless\" sound name \"Tink\""
         _ = runCapture("/usr/bin/osascript", ["-e", script])
     }
 

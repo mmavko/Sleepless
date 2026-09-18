@@ -153,8 +153,16 @@ Two properties the report is built around:
 - **It never concludes "safe".** With no lid-closed sessions on record it says *untested*,
   because that corpus is silent about the only case that matters.
 
-The single exception to reporting after the fact is `.critical`, which is notified immediately:
-at that point the machine is already in trouble and a post-mortem is too late.
+The single exception to reporting after the fact is `.critical`, notified immediately: at that
+point the machine is already in trouble and a post-mortem is too late. But a notification you
+were not there to see is lost, and this app exists precisely for when you are *not* at the Mac —
+so the event is also persisted and shown in the popover and `sleepless status` for 24 hours,
+ageing out by itself.
+
+**The corpus is never rotated.** Summaries (one line per session) and samples (per minute) are
+separate streams for that reason: a single capped file discards the oldest sessions first, and
+the rare session that cooked in a bag is the one the whole exercise exists to capture. Only the
+bulky sample stream has a size cap.
 
 **When it becomes a real net**, the design below still holds — the watchdog already ticks every
 30s with the authority to clear the flag, so thermal becomes *"shorten the lease"* rather than a

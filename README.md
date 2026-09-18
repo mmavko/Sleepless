@@ -134,10 +134,17 @@ doesn't. So rather than act on heat, the app records it:
 ./sleepless report
 ```
 
-Every keep-awake session appends to `~/Library/Application Support/Sleepless/sessions.jsonl`:
-thermal state, battery, power source, lid position and Low Power Mode, sampled each minute and
-on every thermal transition, plus a summary when the session ends. The report tells you whether
-there is yet enough evidence to build the real net, and with what numbers.
+Two streams, with deliberately different lifetimes:
+
+| File | What | Rotated |
+|---|---|---|
+| `sessions.jsonl` | one summary line per keep-awake session — **the corpus** | **never** |
+| `samples.jsonl` | thermal / battery / lid / power, each minute and on every thermal change | at 20 MB |
+
+The summaries are never discarded, because a size cap drops the oldest sessions first and the
+rare one that cooked in a bag is exactly the one worth keeping. They're tiny — a few hundred
+bytes per session. The per-minute samples are the bulk (~115 bytes each, ~10 MB/year at 4h/day)
+and only matter for recent detail, so those rotate.
 
 Two things it deliberately does:
 
@@ -147,8 +154,10 @@ Two things it deliberately does:
 - **It never says "safe".** If no session has run with the lid closed, it says the design is
   *untested*, not safe — because that corpus cannot tell you anything about the case that matters.
 
-The one thing reported in the moment rather than afterwards is `.critical` thermal state, where
-a post-mortem is too late to be useful.
+`.critical` thermal state is the one thing reported in the moment, since a post-mortem there is
+too late. It's also **recorded where it outlives the notification** — you were probably not at
+the Mac when it fired — so the popover and `sleepless status` keep showing it for 24 hours,
+then it ages out on its own.
 
 ## Verify it yourself
 

@@ -180,9 +180,13 @@ HOOKEOF
 # net whose thresholds we would be guessing at, so instead of guessing, the app records what
 # really happens and this reports it. The point of the report is to answer one question:
 # is there enough evidence yet to build the real thermal net, and with what numbers?
+# Summaries only. They are the corpus and are never rotated — the rare session that cooked in
+# a bag is exactly what a size cap would throw away first. The bulky per-minute samples live in
+# samples.jsonl and rotate on their own.
 JOURNAL="$SUPPORT_DIR/sessions.jsonl"
 
 cmd_report() {
+  critical_note || true
   /usr/bin/python3 - "$JOURNAL" <<'PY'
 import json, os, sys
 
@@ -192,7 +196,7 @@ if not paths:
     print("Turn Sleepless on, use the Mac, turn it off — then run this again.")
     sys.exit(0)
 
-summaries, samples = [], []
+summaries = []
 for path in paths:
     with open(path) as handle:
         for line in handle:
@@ -200,10 +204,11 @@ for path in paths:
                 row = json.loads(line)
             except ValueError:
                 continue
-            (summaries if row.get("ev") == "summary" else samples).append(row)
+            if row.get("ev") == "summary":
+                summaries.append(row)
 
 if not summaries:
-    print("Journal exists but no completed sessions yet (%d raw samples)." % len(samples))
+    print("Journal exists but no completed keep-awake sessions yet.")
     sys.exit(0)
 
 RANK = {"nominal": 0, "fair": 1, "serious": 2, "critical": 3}
@@ -250,6 +255,23 @@ else:
 PY
 }
 
+# A critical-heat event is recorded where it survives the notification, because you were
+# probably not at the Mac when it fired. Ages out after a day.
+critical_note() {
+  local at lid age
+  at="$(defaults read "$BUNDLE_ID" lastCriticalAt 2>/dev/null || true)"
+  case "$at" in ''|*[!0-9.]*) return 1 ;; esac
+  at="${at%%.*}"
+  age=$(( $(date +%s) - at ))
+  [ "$age" -ge 0 ] && [ "$age" -lt 86400 ] || return 1
+  lid="$(defaults read "$BUNDLE_ID" lastCriticalLidClosed 2>/dev/null || echo 0)"
+  if [ "$lid" = "1" ]; then
+    echo "⚠️  Hit CRITICAL heat $((age / 60)) min ago, with the lid closed."
+  else
+    echo "⚠️  Hit CRITICAL heat $((age / 60)) min ago (lid open)."
+  fi
+}
+
 cmd_status() {
   local state
   if flag_is_set; then
@@ -276,6 +298,7 @@ cmd_status() {
   else
     echo "claude hook: not in user settings — run 'sleepless hook' (may be set per-project)"
   fi
+  critical_note || true
   flag_is_set
 }
 
