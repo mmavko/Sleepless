@@ -27,7 +27,8 @@ fi
 # is meant to be built from, it is months of evidence that cannot be regenerated, and deleting
 # months of a user's data as a side effect of "uninstall the app" is not ours to decide. The
 # per-minute samples are bulky and reproducible, so those go.
-rm -f "$SUPPORT_DIR/lease" "$SUPPORT_DIR/watchdog.sh" "$SUPPORT_DIR/leaselib.sh" \
+rm -f "$SUPPORT_DIR/lease" "$SUPPORT_DIR/SleeplessWatchdog" "$SUPPORT_DIR/watchdog.sh" \
+      "$SUPPORT_DIR/leaselib.sh" \
       "$SUPPORT_DIR/samples.jsonl" "$SUPPORT_DIR/samples.jsonl.1"
 if [ -s "$SUPPORT_DIR/sessions.jsonl" ]; then
   echo "    kept your session journal: $SUPPORT_DIR/sessions.jsonl"

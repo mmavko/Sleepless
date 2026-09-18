@@ -312,6 +312,13 @@ cmd_status() {
     echo "watchdog:   NOT RUNNING — a crash would leave this Mac awake until reboot"
   fi
 
+  # -n never prompts, -l never executes: this asks whether the grant exists, it does not use it.
+  if /usr/bin/sudo -n -l /usr/bin/pmset -a disablesleep 0 >/dev/null 2>&1; then
+    echo "grant:      installed"
+  else
+    echo "grant:      MISSING — run ./grant.sh once, or the switch cannot work"
+  fi
+
   local found
   if found="$(hook_location)"; then
     echo "claude hook: installed ($found)"

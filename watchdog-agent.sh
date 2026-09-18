@@ -14,7 +14,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LABEL="com.aboudjem.Sleepless.watchdog"
 SUPPORT_DIR="$HOME/Library/Application Support/Sleepless"
-INSTALLED_WATCHDOG="$SUPPORT_DIR/watchdog.sh"
+# Installed under a meaningful name, and run directly via its shebang rather than through
+# `/bin/bash <script>`. macOS's Background Task Management names a login item after the program
+# launchd was given, so the argv form decides whether System Settings says "SleeplessWatchdog"
+# or the useless "bash". Verified: with /bin/bash in ProgramArguments launchd reports
+# `program = /bin/bash`; with the script alone it reports the script's own path.
+INSTALLED_WATCHDOG="$SUPPORT_DIR/SleeplessWatchdog"
 INSTALLED_LIB="$SUPPORT_DIR/leaselib.sh"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/Sleepless-watchdog.log"
@@ -41,7 +46,13 @@ cmd_install() {
   mkdir -p "$SUPPORT_DIR" "$(dirname "$PLIST")" "$(dirname "$LOG")"
   # Install a COPY rather than pointing launchd at the repo: the agent must keep working if
   # the working tree moves, and must not change under it when you switch branches.
-  install -m 0755 "$SCRIPT_DIR/watchdog.sh" "$INSTALLED_WATCHDOG"
+  # /bin/bash, not /usr/bin/env bash: one less interpreter hop for launchd to resolve, and
+  # bash 3.2 is enough for every script here (checked).
+  {
+    echo '#!/bin/bash'
+    tail -n +2 "$SCRIPT_DIR/watchdog.sh"
+  } > "$INSTALLED_WATCHDOG"
+  chmod 0755 "$INSTALLED_WATCHDOG"
   # watchdog.sh sources this from its own directory, so the installed pair is self-contained.
   install -m 0644 "$SCRIPT_DIR/leaselib.sh" "$INSTALLED_LIB"
 
@@ -53,7 +64,6 @@ cmd_install() {
     <key>Label</key>                <string>$LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
         <string>$INSTALLED_WATCHDOG</string>
     </array>
     <key>StartInterval</key>        <integer>$INTERVAL</integer>
@@ -81,7 +91,7 @@ PLIST_EOF
 
 cmd_uninstall() {
   launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
-  rm -f "$PLIST" "$INSTALLED_WATCHDOG" "$INSTALLED_LIB"
+  rm -f "$PLIST" "$INSTALLED_WATCHDOG" "$INSTALLED_LIB" "$SUPPORT_DIR/watchdog.sh"
   if is_loaded; then
     echo "error: $LABEL is still loaded" >&2
     exit 1

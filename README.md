@@ -66,6 +66,28 @@ rather than announcing a turn-off that never happened.
 - **No thermal awareness.** Deliberately last; see the design note.
 - **Lid-close display sleep is untested on hardware.** Verify before trusting it in a bag.
 
+## Is it set up? `sleepless status`
+
+The app can look completely normal and do nothing, so all three prerequisites are reported
+rather than left to be discovered by flipping the switch:
+
+```
+keep-awake: off (normal sleep)
+lease:      none (no lease file)
+watchdog:   running
+grant:      installed
+claude hook: installed (~/.claude/settings.json)
+```
+
+A missing grant is also the top line of the popover caption, above every other warning — while
+it's absent the switch cannot work at all.
+
+**In System Settings → General → Login Items**, the watchdog appears under "Allow in the
+Background" as `SleeplessWatchdog`. The plist deliberately runs the script directly rather than
+through `/bin/bash`, because macOS names the entry after the program launchd was handed — and
+"bash" tells you nothing and looks like something you should turn off. Turning it off there
+disables the dead-man switch; the app will warn you next time you arm.
+
 ## Claude Code integration
 
 > This feature knows about **Claude Code specifically** — nothing else. It watches Claude Code

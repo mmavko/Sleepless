@@ -408,6 +408,30 @@ else
   bad "uninstall.sh does not distinguish the corpus from the bulky samples"
 fi
 
+# --- login-item naming -----------------------------------------------------------------
+# macOS names a background item after the program launchd was handed. With /bin/bash in
+# ProgramArguments, System Settings says "bash" — which tells the user nothing and looks like
+# something to turn off. Verified against launchd: with the wrapper it reports
+# `program = /bin/bash`; with the script alone it reports the script's own path.
+echo
+echo "login-item naming"
+
+if grep -q "<string>/bin/bash</string>" "$REPO/watchdog-agent.sh"; then
+  bad "plist still runs /bin/bash — the login item would be named 'bash'"
+else
+  ok "plist runs the script directly, not via /bin/bash"
+fi
+if grep -q 'SUPPORT_DIR/SleeplessWatchdog' "$REPO/watchdog-agent.sh"; then
+  ok "installed watchdog has an identifiable name"
+else
+  bad "installed watchdog has no identifiable name"
+fi
+if grep -q 'SleeplessWatchdog' "$REPO/uninstall.sh"; then
+  ok "uninstall removes it under that name"
+else
+  bad "uninstall would leave the renamed watchdog behind"
+fi
+
 # --- boot time: the shell/Swift contract --------------------------------------------
 # The lease is keyed on boot time, and the app writes it with sysctlbyname("kern.boottime")
 # while the scripts parse sysctl(8) output. If those disagree by even one, every lease the

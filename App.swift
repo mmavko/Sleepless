@@ -246,6 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastSelfWrittenExpiry = 0       // so we can tell our own renewal from a hook's
     private var watchdogIsLoaded = false        // cached; launchctl is not free enough for renderText
     private var hookIsInstalled = false         // cached alongside it, for the same reason
+    private var grantIsInstalled = false        // without it the app cannot do anything at all
     private var armedWithoutWatchdog = false    // user's explicit per-session override
     private var clamshellToken: Int32 = NOTIFY_TOKEN_INVALID
     private var lidClosed = false
@@ -751,6 +752,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ensureStatusItemVisible()
         refreshWatchdogState()
         refreshHookState()
+        refreshGrantState()
         let on = readSleepDisabled()
         applyUI(on: on)
         if on { enforceSafetyNets() }
@@ -798,6 +800,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the user may have missed entirely.
         if let critical = recentCriticalWarning() {
             captionLabel?.stringValue = critical
+        } else if !grantIsInstalled {
+            // Outranks the history and the watchdog warning: nothing else matters while the app
+            // is unable to do the one thing it exists for.
+            captionLabel?.stringValue = "⚠️ Not set up. Run ./grant.sh once — the switch can't work yet."
         } else if !isOn, let outcome = lastSessionSummary() {
             captionLabel?.stringValue = outcome
         } else if !watchdogIsLoaded {
@@ -1289,6 +1295,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return false
             }
+    }
+
+    // Is the passwordless grant in place? Without it the app looks completely normal and does
+    // nothing — you find out only when you flip the switch and get a modal. Worth saying up
+    // front, so the popover is honest before you touch it.
+    //
+    // `sudo -n -l <command>` ASKS whether the command is permitted instead of running it: -n
+    // never prompts, and -l never executes. Checking by actually running `pmset -a disablesleep 0`
+    // would work too, and would be a needless privileged write on every poll.
+    private func refreshGrantState() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        proc.arguments = ["-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", "0"]
+        proc.standardOutput = Pipe(); proc.standardError = Pipe()
+        proc.standardInput = FileHandle.nullDevice
+        do { try proc.run(); proc.waitUntilExit() } catch { grantIsInstalled = false; return }
+        grantIsInstalled = proc.terminationStatus == 0
     }
 
     // Is the dead-man switch actually running? Cheap enough per poll, too expensive for
