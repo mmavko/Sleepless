@@ -396,6 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         idleControl.frame = NSRect(x: ci, y: ci + 80, width: cw, height: 24)
         g2.addSubview(idleControl)
         idleHintLabel = makeLabel("", font: .systemFont(ofSize: 10), color: .tertiaryLabelColor)
+        idleHintLabel.lineBreakMode = .byTruncatingTail
         idleHintLabel.frame = NSRect(x: ci, y: ci + 110, width: cw, height: 14)
         g2.addSubview(idleHintLabel)
 
@@ -703,25 +704,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // when Claude Code last did something, and how long until this turns itself off.
     private func idleHintText() -> String {
         if idleTimeoutMinutes == 0 {
-            return "Off — a wall-clock timer, not Claude Code activity."
+            // The hook is irrelevant while this is off, so nagging about it here would be
+            // noise. Say what turning it on would do instead — that is the discoverable bit.
+            return "Off. Turn on to end when Claude Code goes quiet."
         }
+        // From here the setting is ON, so the hook's absence actually matters and is named in
+        // EVERY branch below. The transcript fallback does work, so this is not an error — but
+        // silently using the coarser signal would hide a setup step the user believes is done.
+        let hookNote = hookIsInstalled ? "" : " (no hook)"
         guard let remaining = idleSecondsRemaining() else {
             return hookIsInstalled
                 ? "Counts Claude Code tool calls, subagents included."
-                : "No hook — will watch Claude Code transcripts instead."
+                : "No hook — using transcripts. Run: sleepless hook"
         }
         let countdown = String(format: "%d:%02d", remaining / 60, remaining % 60)
         // Name the signal actually in use: the hook is precise, transcripts are the fallback,
-        // and knowing which one you are relying on is the difference between "it works" and
-        // "it works for now". Nothing at all means the hint is the only clue.
+        // and knowing which you are relying on is the difference between "it works" and "it
+        // works for now".
         let hookSeen = lastExternalExtend
-        let transcriptSeen = lastTranscriptActivity
-        let newest = [hookSeen, transcriptSeen].compactMap { $0 }.max()
-        guard let newest else { return "No Claude Code activity yet — sleeping in \(countdown)" }
+        let newest = [hookSeen, lastTranscriptActivity].compactMap { $0 }.max()
+        guard let newest else { return "No activity yet\(hookNote) — sleeping in \(countdown)" }
         let ago = Int(Date().timeIntervalSince(newest))
-        let agoText = ago < 60 ? "just now" : "\(ago / 60) min ago"
+        let agoText = ago < 60 ? "just now" : "\(ago / 60)m ago"
         let source = (hookSeen != nil && hookSeen == newest) ? "tool call" : "activity"
-        return "Claude Code \(source) \(agoText) — sleeping in \(countdown)"
+        return "\(source) \(agoText)\(hookNote) — sleeping in \(countdown)"
     }
 
     private func updateCountdownLabel() {
