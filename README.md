@@ -57,7 +57,12 @@ Keeping awake. Stops when:
 ```
 
 Only conditions that can actually fire are listed. The battery floor can't fire on mains power,
-so it isn't claimed there; if nothing can fire, it says so.
+so it isn't claimed there — and the battery card says *"not in effect on power"* rather than
+leaving the slider looking armed. If nothing can fire, the block says so.
+
+The menu-bar dot means one specific thing: **keep-awake is on, you're on battery, and it's
+discharging.** Power-source changes are picked up immediately (IOKit power-source notifications),
+not on the next 60-second poll.
 
 **Low Power Mode is off by default**, and that's a deliberate reversal. It's a user preference
 ("save power"), not a safety threshold — the battery floor is the safety threshold — and if you

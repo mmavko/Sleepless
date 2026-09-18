@@ -37,6 +37,7 @@
 //   @main enum + @MainActor static main() entry is Swift-6 isolation-safe.
 import AppKit
 import CoreGraphics
+import IOKit.ps
 import ServiceManagement
 import notify
 
@@ -258,6 +259,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hookIsInstalled = false         // cached alongside it, for the same reason
     private var grantIsInstalled = false        // without it the app cannot do anything at all
     private var armedWithoutWatchdog = false    // user's explicit per-session override
+    private var powerSourceSource: CFRunLoopSource?
+    private var floorInEffectLabel: NSTextField!
     private var clamshellToken: Int32 = NOTIFY_TOKEN_INVALID
     private var lidClosed = false
     private var keepAwakeTimer: Timer?       // one-shot: flips sleep back on when it fires
@@ -282,6 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recoverAbandonedSession()   // did the previous run die with keep-awake on?
         refresh()   // reflect TRUE system state on launch (never a stale assumption)
         startClamshellObserver()
+        startPowerSourceObserver()
         NotificationCenter.default.addObserver(self, selector: #selector(thermalChanged),
                                               name: ProcessInfo.thermalStateDidChangeNotification,
                                               object: nil)
@@ -440,6 +444,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         maxHint.alignment = .right
         maxHint.frame = NSRect(x: contentW - ci - 34, y: ci + 50, width: 34, height: 13)
         g3.addSubview(maxHint)
+        // The floor can only fire while discharging. Saying so here, rather than leaving the
+        // slider looking armed, is the same honesty as omitting it from the status block.
+        floorInEffectLabel = makeLabel("", font: .systemFont(ofSize: 10), color: .tertiaryLabelColor)
+        floorInEffectLabel.alignment = .center
+        floorInEffectLabel.frame = NSRect(x: ci + 36, y: ci + 50, width: cw - 72, height: 13)
+        g3.addSubview(floorInEffectLabel)
         let lowPowerLabel = makeLabel("Also stop in Low Power Mode", font: .systemFont(ofSize: 13), color: .labelColor)
         lowPowerLabel.frame = NSRect(x: ci, y: ci + 72, width: cw - swW - 8, height: 22)
         g3.addSubview(lowPowerLabel)
@@ -844,6 +854,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Update text labels only (no pmset subprocess; safe to call on every slider tick).
     private func renderText() {
         floorValueLabel?.stringValue = "\(batteryFloorPercent)%"
+        floorInEffectLabel?.stringValue = cachedOnBattery ? "" : "not in effect on power" 
         idleHintLabel?.stringValue = idleHintText()
         statusLabel?.stringValue = stopConditionsText()
         // Heat that already happened outranks a risk that might: it is the only one of these
@@ -1426,6 +1437,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         var state: UInt64 = 0
         if notify_get_state(clamshellToken, &state) == UInt32(NOTIFY_STATUS_OK) { lidClosed = state != 0 }
+    }
+
+    // Plugging in or unplugging changes three visible things at once: the menu-bar dot (ARMED
+    // means on battery AND discharging), whether the battery floor is a live stop condition,
+    // and the battery percentage in the status block. Waiting up to 60s for the next poll made
+    // the popover look stale in exactly the moment the user was watching it.
+    private func startPowerSourceObserver() {
+        let callback: IOPowerSourceCallbackType = { context in
+            guard let context else { return }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
+            MainActor.assumeIsolated { delegate.powerSourceChanged() }
+        }
+        guard let source = IOPSNotificationCreateRunLoopSource(callback,
+                                                               Unmanaged.passUnretained(self).toOpaque())?
+                .takeRetainedValue() else {
+            NSLog("Sleepless: couldn't observe power-source changes; falling back to the poll")
+            return
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        powerSourceSource = source
+    }
+
+    // Deliberately lighter than refresh(): this can fire on every battery percentage change, so
+    // it re-reads the battery and repaints, and re-checks the safety nets only while armed.
+    private func powerSourceChanged() {
+        applyUI(on: isOn)
+        if isOn { enforceSafetyNets() }
     }
 
     private func clamshellChanged(closed: Bool) {
