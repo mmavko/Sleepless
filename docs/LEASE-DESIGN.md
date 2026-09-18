@@ -1,6 +1,10 @@
 # Design note: the lease and the dead-man switch
 
-**Status:** design only. Nothing here is built yet.
+**Status:** step 1 built (`watchdog.sh`, `lease.sh`, `watchdog-agent.sh`, `tests/watchdog-selftest.sh`). Steps 2–5 not started.
+
+> **Do not load the agent yet.** With the watchdog running and nothing renewing the
+> lease, it will correctly clear the flag within one tick — undoing the app's switch.
+> It becomes useful the moment step 2 lands.
 
 ## The problem
 
@@ -73,6 +77,23 @@ small tool rather than something that installs a root daemon.
 The asymmetry matters: renewal must be much more frequent than expiry, or normal operation
 looks like a crash.
 
+## Lease file format, v1 — implemented
+
+`~/Library/Application Support/Sleepless/lease`, mode 0600:
+
+```
+version=1
+expires=1789456789      # unix epoch seconds
+boot=1789400000         # kern.boottime sec, so a lease cannot outlive its boot
+```
+
+Every field is matched as an explicit run of digits. The file is **parsed, never sourced
+and never eval'd** — a corrupt or hostile lease yields an empty field, which reads as "no
+live lease", which clears the flag. The failure direction is always toward sleeping.
+
+Written with write-then-rename so the watchdog can never read a half-written lease.
+`lease.sh` is the reference writer; the GUI and CLI will write the same format directly.
+
 ## Lease semantics
 
 - `extend <ttl>` → `expiry = max(existing, now + ttl)`. Never shortens someone else's lease.
@@ -130,8 +151,8 @@ Which is why it's step 5, not step 1.
 
 ## Order of work
 
-1. Lease file format + the watchdog agent + `install.sh` / `uninstall.sh` integration.
-2. GUI writes and renews the lease; refuses to arm without a loaded watchdog.
+1. ~~Lease file format + the watchdog agent + `install.sh` / `uninstall.sh` integration.~~ **Done.**
+2. GUI writes and renews the lease; refuses to arm without a loaded watchdog. **Next.**
 3. CLI.
 4. Claude Code hook wiring (`Stop` → `sleepless off`).
 5. Thermal, as a lease-shortener.

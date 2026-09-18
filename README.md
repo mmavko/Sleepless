@@ -23,6 +23,9 @@ Keeping that scope explicit is what stops the app growing into a power manager.
 ./build.sh /Applications && ./grant.sh
 ```
 
+(Use these two rather than `./install.sh` for now — `install.sh` also loads the watchdog
+agent, which isn't useful until step 2. See **Known gaps**.)
+
 `build.sh` compiles `App.swift` with `swiftc` and hand-assembles an ad-hoc-signed bundle —
 no Xcode project, no downloaded blobs.
 
@@ -56,10 +59,13 @@ rather than announcing a turn-off that never happened.
 
 ## Known gaps
 
-- **No dead-man switch.** Quit or crash the app while it's ON and `disablesleep` stays 1 until
-  you reboot or run `sudo pmset -a disablesleep 0`. This is upstream issue
-  [#8](https://github.com/Aboudjem/Sleepless/issues/8) and the main thing this fork is for —
-  design in [docs/LEASE-DESIGN.md](docs/LEASE-DESIGN.md), not yet built.
+- **The dead-man switch is half-built.** The watchdog exists and is tested
+  (`watchdog.sh`, `lease.sh`, `./tests/watchdog-selftest.sh`), but nothing renews a lease yet,
+  so **don't load the agent**: it would correctly clear the flag within a tick and undo the
+  switch. Until then, quitting or crashing while ON leaves `disablesleep` at 1 until you
+  reboot or run `sudo pmset -a disablesleep 0`. Upstream issue
+  [#8](https://github.com/Aboudjem/Sleepless/issues/8); design and status in
+  [docs/LEASE-DESIGN.md](docs/LEASE-DESIGN.md).
 - **No CLI.** Planned, so a Claude Code `Stop` hook can release the lease.
 - **No thermal awareness.** Deliberately last; see the design note.
 - **Lid-close display sleep is untested on hardware.** Verify before trusting it in a bag.
