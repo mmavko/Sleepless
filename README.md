@@ -46,10 +46,28 @@ Run it yourself, once per machine. **The app never installs it** — see
 process. So the app doesn't latch the flag — it holds a **lease** it must keep renewing, and a
 `launchd` watchdog clears the flag when nobody does. See [docs/LEASE-DESIGN.md](docs/LEASE-DESIGN.md).
 
+The popover answers *"what will stop this, and when"* in one place, rather than making you
+assemble it from four controls:
+
+```
+Keeping awake. Stops when:
+  Timer ends · 2:58:04
+  Claude Code goes idle · 18:22
+  Battery hits 15% · now 87%
+```
+
+Only conditions that can actually fire are listed. The battery floor can't fire on mains power,
+so it isn't claimed there; if nothing can fire, it says so.
+
+**Low Power Mode is off by default**, and that's a deliberate reversal. It's a user preference
+("save power"), not a safety threshold — the battery floor is the safety threshold — and if you
+leave LPM on whenever you're on battery, the old always-on behaviour would have targeted exactly
+the situation this app exists for.
+
 | Net | Behaviour |
 |---|---|
 | Battery floor | Turns off at 5–50% on battery (default 15%). Beats a deliberate turn-on. |
-| Low Power Mode | Steps aside when LPM is on and discharging, unless you deliberately turned it on. |
+| Low Power Mode | **Off by default** — opt in if you want LPM to stop keep-awake. |
 | Auto-off timer | 1h / 2h wall-clock ceiling, live countdown. Retries if the privileged call fails. |
 | Idle timeout | Off by default. Stops N minutes after **Claude Code** last did anything. |
 | Lid close | Puts the built-in display to sleep, so a closed laptop isn't lit, hot and unlocked. |
