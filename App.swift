@@ -953,8 +953,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let endedAt = defaults.double(forKey: lastEndedAtKey)
         guard endedAt > 0, Date().timeIntervalSince1970 - endedAt < lastSessionTTL,
               let reason = defaults.string(forKey: lastReasonKey) else { return nil }
-        let duration = formatDuration(defaults.integer(forKey: lastDurationKey))
-        return "Kept awake \(duration), then off: \(friendlyReason(reason))"
+        let seconds = defaults.integer(forKey: lastDurationKey)
+        let started = Date(timeIntervalSince1970: endedAt - Double(seconds))
+        let clock = DateFormatter()
+        clock.dateFormat = "HH:mm"
+        return "[\(clock.string(from: started))] Kept awake \(formatDuration(seconds)), then off: \(friendlyReason(reason))"
     }
 
     // Announce on the lid-open edge — the moment you are actually back — and only once, and

@@ -371,7 +371,9 @@ last_session_note() {
     external) reason="the watchdog stepped in" ;;
     crash)    reason="Sleepless stopped unexpectedly; the watchdog restored sleep" ;;
   esac
-  printf 'last run:    kept awake %d min, then off: %s\n' "$(( dur / 60 ))" "$reason"
+  local started
+  started="$(date -r "$(( ended - dur ))" '+%H:%M')"
+  printf 'last run:    [%s] kept awake %d min, then off: %s\n' "$started" "$(( dur / 60 ))" "$reason"
 }
 
 cmd_status() {
