@@ -205,7 +205,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var idleControl: NSSegmentedControl!
     private var idleTimeoutMinutes = 0
     private var armedAt: Date?                  // when the switch was last turned on
-    private var lastExternalExtend: Date?       // last time someone ELSE pushed the lease out
+    private var lastExternalExtend: Date?       // last time a hook pushed the lease out
+    private var lastTranscriptActivity: Date?   // zero-setup fallback: newest Claude Code transcript
     private var lastSelfWrittenExpiry = 0       // so we can tell our own renewal from a hook's
     private var watchdogIsLoaded = false        // cached; launchctl is not free enough for renderText
     private var hookIsInstalled = false         // cached alongside it, for the same reason
@@ -642,7 +643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Seconds until the idle timeout turns keep-awake off, or nil when it can't fire.
     private func idleSecondsRemaining() -> Int? {
-        guard idleTimeoutMinutes > 0, isOn, let since = lastExternalExtend ?? armedAt else { return nil }
+        guard idleTimeoutMinutes > 0, isOn, let since = lastActivity() else { return nil }
         let remaining = Double(idleTimeoutMinutes * 60) - Date().timeIntervalSince(since)
         return remaining > 0 ? Int(remaining.rounded()) : 0
     }
@@ -653,19 +654,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if idleTimeoutMinutes == 0 {
             return "Off — a wall-clock timer, not Claude Code activity."
         }
-        if !hookIsInstalled {
-            return "⚠️ No Claude Code hook found — run ./sleepless hook"
-        }
         guard let remaining = idleSecondsRemaining() else {
-            return "Counts Claude Code tool calls, subagents included."
+            return hookIsInstalled
+                ? "Counts Claude Code tool calls, subagents included."
+                : "No hook — will watch Claude Code transcripts instead."
         }
         let countdown = String(format: "%d:%02d", remaining / 60, remaining % 60)
-        guard let last = lastExternalExtend else {
-            return "No tool calls yet — sleeping in \(countdown)"
-        }
-        let ago = Int(Date().timeIntervalSince(last))
+        // Name the signal actually in use: the hook is precise, transcripts are the fallback,
+        // and knowing which one you are relying on is the difference between "it works" and
+        // "it works for now". Nothing at all means the hint is the only clue.
+        let hookSeen = lastExternalExtend
+        let transcriptSeen = lastTranscriptActivity
+        let newest = [hookSeen, transcriptSeen].compactMap { $0 }.max()
+        guard let newest else { return "No Claude Code activity yet — sleeping in \(countdown)" }
+        let ago = Int(Date().timeIntervalSince(newest))
         let agoText = ago < 60 ? "just now" : "\(ago / 60) min ago"
-        return "Last tool call \(agoText) — sleeping in \(countdown)"
+        let source = (hookSeen != nil && hookSeen == newest) ? "tool call" : "activity"
+        return "Claude Code \(source) \(agoText) — sleeping in \(countdown)"
     }
 
     private func updateCountdownLabel() {
@@ -895,16 +900,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func renewLease() {
         guard isOn else { stopLeaseRenewal(); return }
-        // Idle timeout: measured from the last time SOMEONE ELSE pushed the lease out (a
-        // `sleepless extend` from a PreToolUse hook), falling back to when we armed. Our own
-        // 30s renewal deliberately does not count as activity, or this could never fire.
-        if idleTimeoutMinutes > 0, let since = lastExternalExtend ?? armedAt,
+        // Idle timeout: measured from the last time a HOOK pushed the lease out, or failing that
+        // the newest Claude Code transcript write, with arming as the floor. Our own 30s renewal
+        // deliberately does not count as activity, or this could never fire. Scanned here rather
+        // than in renderText because it walks the filesystem.
+        if idleTimeoutMinutes > 0, !hookSpokeRecently() {
+            // Only walk the filesystem when the precise signal has gone quiet. Measured at
+            // ~31 ms for 257 transcripts, and this runs on the main thread, so with a working
+            // hook it should cost nothing at all — and it does: zero scans.
+            lastTranscriptActivity = newestTranscriptActivity()
+        }
+        if idleTimeoutMinutes > 0, let since = lastActivity(),
            Date().timeIntervalSince(since) > Double(idleTimeoutMinutes * 60) {
             turnOffForSafety("No tool calls for \(idleTimeoutMinutes) min",
                              success: "No tool calls for \(idleTimeoutMinutes) min. Sleepless turned off.")
             return
         }
         extendLease()
+    }
+
+    // Zero-setup fallback for the activity signal, borrowed from the sibling claude-tracker
+    // project: Claude Code writes a transcript per session under ~/.claude/projects, in both the
+    // CLI and the desktop app, so their mtimes say when it last did anything — with nothing to
+    // install and no way to silently fail. The hook stays primary because it is precise and
+    // push-based; this is the floor under it.
+    //
+    // We need far less than claude-tracker does. It answers "is this session working, and is it
+    // the main agent or only subagents", so it parses the last line for `end_turn` and tracks
+    // session identity. We need one boolean heartbeat, so the newest mtime anywhere is enough —
+    // double-counting a session written to two project directories (which happens in a git
+    // worktree) is harmless here.
+    //
+    // Their hard-won gotcha applies though: a directory's mtime does NOT change when a file
+    // inside it is written, so this has to stat the files, not the folders.
+    private func newestTranscriptActivity() -> Date? {
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
+        guard let walker = FileManager.default.enumerator(at: root,
+                                                          includingPropertiesForKeys: keys,
+                                                          options: [.skipsHiddenFiles, .skipsPackageDescendants])
+        else { return nil }
+        var newest: Date?
+        for case let url as URL in walker {
+            guard url.pathExtension == "jsonl",
+                  let values = try? url.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true,
+                  let modified = values.contentModificationDate else { continue }
+            if newest == nil || modified > newest! { newest = modified }
+        }
+        return newest
+    }
+
+    private func hookSpokeRecently() -> Bool {
+        guard let last = lastExternalExtend else { return false }
+        return Date().timeIntervalSince(last) < leaseRenewInterval
+    }
+
+    // The activity the idle timeout is measured against: whichever signal spoke most recently,
+    // with the moment we armed as the floor so a fresh turn-on is never instantly idle.
+    private func lastActivity() -> Date? {
+        [lastExternalExtend, lastTranscriptActivity, armedAt].compactMap { $0 }.max()
     }
 
     // Is a Claude Code PreToolUse hook actually calling `sleepless extend`? Without one the

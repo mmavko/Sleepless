@@ -208,7 +208,24 @@ hooks at all. There is no "still running" event to hang a heartbeat on, so the a
 CLI's manual escape hatch — `sleepless extend 2h` before kicking one off — rather than more
 machinery.
 
-**Detection, because a missing hook fails silently.** Without a `PreToolUse` hook the idle
+**A transcript fallback, so a missing hook is no longer silent.** Claude Code writes a
+transcript per session under `~/.claude/projects`, from both the CLI and the desktop app, so
+their mtimes say when it last did anything — with nothing to install and no way to fail quietly.
+The hook stays primary (precise, push-based); this is the floor under it. The idea comes from
+the sibling claude-tracker project, which rejected hooks for exactly this reason: *"transcripts
+need no setup; hooks remain a fallback."*
+
+We need far less than it does. It answers "is this session working, and is it the main agent or
+only subagents", so it parses the last line for `end_turn` and tracks session identity. We need
+one boolean heartbeat, so the newest mtime anywhere is enough — and double-counting a session
+written to two project directories (which happens in a git worktree) is harmless here. Its
+hard-won gotcha does carry over: a directory's mtime does not change when a file inside it is
+written, so this stats files, not folders.
+
+Cost: ~31 ms for 257 transcripts, on the main thread. So the scan only runs when the hook has
+gone quiet — with a working hook it does not run at all.
+
+**Detection, because a missing hook still matters.** Without a `PreToolUse` hook the idle
 timeout has nothing to count and turns keep-awake off on schedule however hard Claude is working
 — and nothing in that sequence looks like an error. So `sleepless hook` checks the user-level
 settings files, `sleepless status` reports it, `install.sh` reminds, and the popover's hint line

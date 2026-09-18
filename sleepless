@@ -157,8 +157,9 @@ cmd_hook() {
   cat <<HOOKEOF
 ⚠️  No PreToolUse hook found in ~/.claude/settings.json.
 
-Without it the "Stop after no tool calls" setting has nothing to count, so it will turn
-keep-awake off on schedule however hard Claude is working. Add this to
+Without it, "Stop when Claude Code goes idle" falls back to watching Claude Code transcript
+mtimes under ~/.claude/projects. That works with no setup, but it is coarser: it sees that
+Claude did something, not what. The hook is precise and worth adding — put this in
 ~/.claude/settings.json (all sessions on this Mac) or a project's .claude/settings.json:
 
   {
