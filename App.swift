@@ -58,6 +58,13 @@ private let leaseRelativePath = "Library/Application Support/Sleepless/lease"
 private let idleKey = "idleTimeoutMinutes"
 private let idleChoices = [0, 10, 20, 60]
 
+// Low Power Mode as a stop condition, OFF by default. It is a user PREFERENCE ("save power"),
+// not a safety threshold — the battery floor is the safety threshold — and plenty of people
+// leave LPM on permanently while on battery, which is exactly the situation this app exists
+// for. It was previously hardcoded on and silently bypassed by an invisible `userForcedOn`
+// flag, so the popover claimed a behaviour that could not actually happen.
+private let stopOnLowPowerKey = "stopOnLowPowerMode"
+
 // Session journal — instrumentation, deliberately NOT a safety net (see docs/LEASE-DESIGN.md).
 // Thermal protection is the one net whose thresholds we would be GUESSING at, and a guessed
 // threshold is worse than none: it trips when it shouldn't and lends false confidence when it
@@ -225,12 +232,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var floorValueLabel: NSTextField!
     private var floorSlider: NSSlider!
     private var autoOffControl: NSSegmentedControl!
-    private var countdownLabel: NSTextField!
     private var loginSwitch: NSSwitch!
     private var clickMonitor: Any?
     private var batteryFloorPercent = floorDefault
     private var isOn = false
-    private var userForcedOn = false   // user deliberately turned it on; honor over the Low Power Mode auto-off (the hard battery floor still wins)
+    private var cachedBatteryPercent = -1
+    private var cachedOnBattery = false
+    private var stopOnLowPower = false
+    private var lowPowerSwitch: NSSwitch!
+    private var statusLabel: NSTextField!
 
     // Auto-off timer (in-memory; dies on quit, never survives a reboot)
     private var autoOffMinutes = 0           // 0 = none (stay on until off), 60, or 120
@@ -255,13 +265,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timerEndDate: Date?
 
     private let popoverWidth: CGFloat = 320
-    private let popoverHeight: CGFloat = 500
+    private let popoverHeight: CGFloat = 556
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         batteryFloorPercent = min(max((UserDefaults.standard.object(forKey: floorKey) as? Int) ?? floorDefault, floorMin), floorMax)
         idleTimeoutMinutes = (UserDefaults.standard.object(forKey: idleKey) as? Int) ?? 0
         if !idleChoices.contains(idleTimeoutMinutes) { idleTimeoutMinutes = 0 }
+        stopOnLowPower = UserDefaults.standard.bool(forKey: stopOnLowPowerKey)
         createStatusItem()
         popover.behavior = .applicationDefined   // app-managed dismissal (no transient close/reopen flicker)
         popover.animates = true
@@ -341,7 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let swH = swProto.height > 0 ? swProto.height : 21
 
         // GROUP 1 — main switch + state caption
-        let g1y: CGFloat = 46, g1h: CGFloat = 84
+        let g1y: CGFloat = 46, g1h: CGFloat = 132
         let g1 = makeCard(NSRect(x: pad, y: g1y, width: contentW, height: g1h))
         mainCard = g1
         let rowLabel = makeLabel("Keep awake with lid closed", font: .systemFont(ofSize: 13), color: .labelColor)
@@ -353,15 +364,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleSwitch.frame = NSRect(x: contentW - ci - swW, y: ci + (22 - swH) / 2, width: swW, height: swH)
         g1.addSubview(toggleSwitch)
         captionLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
-        captionLabel.frame = NSRect(x: ci, y: ci + 30, width: cw, height: 32)
+        captionLabel.frame = NSRect(x: ci, y: ci + 28, width: cw, height: 30)
         captionLabel.usesSingleLineMode = false
         captionLabel.lineBreakMode = .byWordWrapping
         captionLabel.maximumNumberOfLines = 2
         captionLabel.cell?.wraps = true
         g1.addSubview(captionLabel)
+        // Answers the one question the old layout made you assemble from four places: what will
+        // stop this, and when. Monospaced digits so ticking countdowns do not jitter.
+        statusLabel = makeLabel("", font: .monospacedDigitSystemFont(ofSize: 11, weight: .regular),
+                                color: .secondaryLabelColor)
+        statusLabel.frame = NSRect(x: ci, y: ci + 60, width: cw, height: 58)
+        statusLabel.usesSingleLineMode = false
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.maximumNumberOfLines = 4
+        statusLabel.cell?.wraps = true
+        g1.addSubview(statusLabel)
 
         // GROUP 2 — auto-off timer (label + segmented [Off | 1h | 2h] + countdown)
-        let g2y = g1y + g1h + 12, g2h: CGFloat = 146
+        let g2y = g1y + g1h + 12, g2h: CGFloat = 124
         let g2 = makeCard(NSRect(x: pad, y: g2y, width: contentW, height: g2h))
         let timerLabel = makeLabel("Auto-off timer", font: .systemFont(ofSize: 13), color: .labelColor)
         timerLabel.frame = NSRect(x: ci, y: ci + 3, width: 110, height: 22)
@@ -377,15 +398,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let segW = segSize.width > 0 ? segSize.width : 150
         autoOffControl.frame = NSRect(x: contentW - ci - segW, y: ci, width: segW, height: max(segSize.height, 24))
         g2.addSubview(autoOffControl)
-        countdownLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
-        countdownLabel.frame = NSRect(x: ci, y: ci + 36, width: cw, height: 16)
-        g2.addSubview(countdownLabel)
-
         // Same card because it answers the same question — when does this end? The timer is a
         // wall-clock ceiling; this one bounds IDLENESS. Neither replaces the other: without the
         // ceiling, a session that keeps calling tools holds the Mac awake indefinitely on AC.
         let idleLabel = makeLabel("Stop when Claude Code goes idle", font: .systemFont(ofSize: 13), color: .labelColor)
-        idleLabel.frame = NSRect(x: ci, y: ci + 58, width: cw, height: 18)
+        idleLabel.frame = NSRect(x: ci, y: ci + 34, width: cw, height: 18)
         g2.addSubview(idleLabel)
         idleControl = NSSegmentedControl(labels: idleChoices.map { $0 == 0 ? "Off" : "\($0)m" },
                                          trackingMode: .selectOne,
@@ -393,15 +410,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         idleControl.selectedSegment = idleChoices.firstIndex(of: idleTimeoutMinutes) ?? 0
         idleControl.controlSize = .regular
         idleControl.segmentStyle = .automatic
-        idleControl.frame = NSRect(x: ci, y: ci + 80, width: cw, height: 24)
+        idleControl.frame = NSRect(x: ci, y: ci + 56, width: cw, height: 24)
         g2.addSubview(idleControl)
         idleHintLabel = makeLabel("", font: .systemFont(ofSize: 10), color: .tertiaryLabelColor)
         idleHintLabel.lineBreakMode = .byTruncatingTail
-        idleHintLabel.frame = NSRect(x: ci, y: ci + 110, width: cw, height: 14)
+        idleHintLabel.frame = NSRect(x: ci, y: ci + 86, width: cw, height: 14)
         g2.addSubview(idleHintLabel)
 
         // GROUP 3 — battery-floor (label + value + slider + min/max hints)
-        let g3y = g2y + g2h + 12, g3h: CGFloat = 92
+        let g3y = g2y + g2h + 12, g3h: CGFloat = 122
         let g3 = makeCard(NSRect(x: pad, y: g3y, width: contentW, height: g3h))
         let floorLabel = makeLabel("Auto-off at low battery", font: .systemFont(ofSize: 13), color: .labelColor)
         floorLabel.frame = NSRect(x: ci, y: ci, width: cw - 54, height: 18)
@@ -423,6 +440,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         maxHint.alignment = .right
         maxHint.frame = NSRect(x: contentW - ci - 34, y: ci + 50, width: 34, height: 13)
         g3.addSubview(maxHint)
+        let lowPowerLabel = makeLabel("Also stop in Low Power Mode", font: .systemFont(ofSize: 13), color: .labelColor)
+        lowPowerLabel.frame = NSRect(x: ci, y: ci + 72, width: cw - swW - 8, height: 22)
+        g3.addSubview(lowPowerLabel)
+        lowPowerSwitch = NSSwitch()
+        lowPowerSwitch.target = self
+        lowPowerSwitch.action = #selector(lowPowerToggled(_:))
+        lowPowerSwitch.state = stopOnLowPower ? .on : .off
+        lowPowerSwitch.frame = NSRect(x: contentW - ci - swW, y: ci + 72 + (22 - swH) / 2, width: swW, height: swH)
+        g3.addSubview(lowPowerSwitch)
 
         // GROUP 4 — launch at login (off by default; never auto-enables sleep prevention)
         let g4y = g3y + g3h + 12, g4h: CGFloat = 46
@@ -473,8 +499,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
-        if keepAwakeTimer != nil || idleSecondsRemaining() != nil { startCountdownTicker() }
-        updateCountdownLabel()
+        if isOn { startCountdownTicker() }
+        refreshLiveText()
         // Close when the user clicks anywhere outside the app (status bar, another app, desktop).
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.closePopover()
@@ -543,8 +569,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             stopLeaseRenewal()
             endJournalSession(reason: "switch")
         }
-        // A deliberate, successful turn-on wins over the Low Power Mode auto-off (hard floor still wins).
-        userForcedOn = wantOn
         refresh()                              // applies UI + safety nets; switch reflects reality
         if isOn, autoOffMinutes > 0 { startKeepAwakeTimer(minutes: autoOffMinutes) }
         return false
@@ -602,6 +626,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func thermalChanged() { recordSample("thermal") }
 
+    @objc private func lowPowerToggled(_ sender: NSSwitch) {
+        stopOnLowPower = sender.state == .on
+        UserDefaults.standard.set(stopOnLowPower, forKey: stopOnLowPowerKey)
+        renderText()
+        if isOn { enforceSafetyNets() }   // turning it on can apply immediately
+    }
+
     @objc private func idleChanged(_ sender: NSSegmentedControl) {
         let index = max(0, min(sender.selectedSegment, idleChoices.count - 1))
         idleTimeoutMinutes = idleChoices[index]
@@ -623,19 +654,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             startKeepAwakeTimer(minutes: autoOffMinutes)
         } else {
             cancelKeepAwakeTimer()
-            updateCountdownLabel()
+            refreshLiveText()
         }
     }
 
     private func startKeepAwakeTimer(minutes: Int) {
         cancelKeepAwakeTimer()
-        guard minutes > 0, isOn else { updateCountdownLabel(); return }
+        guard minutes > 0, isOn else { refreshLiveText(); return }
         let seconds = TimeInterval(minutes * 60)
         timerEndDate = Date().addingTimeInterval(seconds)
         keepAwakeTimer = Timer.scheduledTimer(timeInterval: seconds, target: self,
                                               selector: #selector(keepAwakeTimerFired), userInfo: nil, repeats: false)
         if popover.isShown { startCountdownTicker() }
-        updateCountdownLabel()
+        refreshLiveText()
     }
 
     private func cancelKeepAwakeTimer() {
@@ -657,7 +688,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keepAwakeTimer = Timer.scheduledTimer(timeInterval: pollInterval, target: self,
                                                   selector: #selector(keepAwakeTimerFired),
                                                   userInfo: nil, repeats: false)
-            updateCountdownLabel()
+            refreshLiveText()
         }
     }
 
@@ -688,10 +719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                selector: #selector(countdownTick), userInfo: nil, repeats: true)
     }
 
-    @objc private func countdownTick() {
-        updateCountdownLabel()
-        idleHintLabel?.stringValue = idleHintText()   // the idle countdown ticks too
-    }
+    @objc private func countdownTick() { refreshLiveText() }
 
     // Seconds until the idle timeout turns keep-awake off, or nil when it can't fire.
     private func idleSecondsRemaining() -> Int? {
@@ -700,43 +728,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return remaining > 0 ? Int(remaining.rounded()) : 0
     }
 
-    // One line carrying the three things worth knowing: whether the hook is wired up at all,
-    // when Claude Code last did something, and how long until this turns itself off.
-    private func idleHintText() -> String {
-        if idleTimeoutMinutes == 0 {
-            // The hook is irrelevant while this is off, so nagging about it here would be
-            // noise. Say what turning it on would do instead — that is the discoverable bit.
-            return "Off. Turn on to end when Claude Code goes quiet."
-        }
-        // From here the setting is ON, so the hook's absence actually matters and is named in
-        // EVERY branch below. The transcript fallback does work, so this is not an error — but
-        // silently using the coarser signal would hide a setup step the user believes is done.
-        let hookNote = hookIsInstalled ? "" : " (no hook)"
-        guard let remaining = idleSecondsRemaining() else {
-            return hookIsInstalled
-                ? "Counts Claude Code tool calls, subagents included."
-                : "No hook — using transcripts. Run: sleepless hook"
-        }
-        let countdown = String(format: "%d:%02d", remaining / 60, remaining % 60)
-        // Name the signal actually in use: the hook is precise, transcripts are the fallback,
-        // and knowing which you are relying on is the difference between "it works" and "it
-        // works for now".
-        let hookSeen = lastExternalExtend
-        let newest = [hookSeen, lastTranscriptActivity].compactMap { $0 }.max()
-        guard let newest else { return "No activity yet\(hookNote) — sleeping in \(countdown)" }
-        let ago = Int(Date().timeIntervalSince(newest))
-        let agoText = ago < 60 ? "just now" : "\(ago / 60)m ago"
-        let source = (hookSeen != nil && hookSeen == newest) ? "tool call" : "activity"
-        return "\(source) \(agoText)\(hookNote) — sleeping in \(countdown)"
+    private func clockText(_ seconds: Int) -> String {
+        let h = seconds / 3600, m = (seconds % 3600) / 60, sec = seconds % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
     }
 
-    private func updateCountdownLabel() {
-        guard let end = timerEndDate, isOn else { countdownLabel?.stringValue = ""; return }
-        let remaining = Int(end.timeIntervalSinceNow.rounded())
-        guard remaining > 0 else { countdownLabel?.stringValue = ""; return }
-        let h = remaining / 3600, m = (remaining % 3600) / 60, s = remaining % 60
-        let t = h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
-        countdownLabel?.stringValue = "Auto-off in \(t)"
+    // Every condition that can currently stop keep-awake, with its live value. Only the ones
+    // that can actually fire are listed — a short list is the answer, not an omission. On mains
+    // power with no timer and no idle limit the honest answer is "nothing will".
+    private func stopConditionsText() -> String {
+        // While off, this space carries the history instead: what the last run did and why it
+        // ended is the thing you want when you come back to a closed laptop.
+        guard isOn else { return lastSessionSummary() ?? "" }
+        var lines: [String] = []
+        if autoOffMinutes > 0, let end = timerEndDate {
+            lines.append("  Timer ends · \(clockText(max(0, Int(end.timeIntervalSinceNow.rounded()))))")
+        }
+        if idleTimeoutMinutes > 0, let remaining = idleSecondsRemaining() {
+            lines.append("  Claude Code goes idle · \(clockText(remaining))\(hookIsInstalled ? "" : " (no hook)")")
+        }
+        // The floor can only fire while discharging, so on mains power it is not a live
+        // condition and claiming otherwise would be the same kind of lie the old caption told.
+        if cachedOnBattery, cachedBatteryPercent >= 0 {
+            lines.append("  Battery hits \(batteryFloorPercent)% · now \(cachedBatteryPercent)%")
+        }
+        if stopOnLowPower {
+            lines.append("  Low Power Mode turns on")
+        }
+        if lines.isEmpty { return "  Nothing will stop it automatically." }
+        return lines.joined(separator: "\n")
+    }
+
+    // One line carrying the three things worth knowing: whether the hook is wired up at all,
+    // when Claude Code last did something, and how long until this turns itself off.
+    // Describes the setting itself; the countdown lives in the status block now. Names the
+    // signal in use, because relying on the coarse fallback without knowing it is the
+    // difference between "it works" and "it works for now".
+    private func idleHintText() -> String {
+        if idleTimeoutMinutes == 0 {
+            // The hook is irrelevant while this is off, so nagging about it here would be noise.
+            return "Off. Turn on to end when Claude Code goes quiet."
+        }
+        guard hookIsInstalled else { return "No hook — watching transcripts. Run: sleepless hook" }
+        guard isOn, let newest = [lastExternalExtend, lastTranscriptActivity].compactMap({ $0 }).max()
+        else { return "Counts Claude Code tool calls, subagents included." }
+        let ago = Int(Date().timeIntervalSince(newest))
+        return ago < 60 ? "Last Claude Code activity: just now." : "Last Claude Code activity: \(ago / 60) min ago."
+    }
+
+    // Everything whose text changes on its own while the popover is open.
+    private func refreshLiveText() {
+        statusLabel?.stringValue = stopConditionsText()
+        idleHintLabel?.stringValue = idleHintText()
     }
 
     // MARK: - Launch at login (Feature 2) — OFF by default; never re-enables sleep prevention
@@ -774,10 +817,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ARMED = kept awake while actively discharging on battery, so the
         // auto-off safety net is live. Distinct menu-bar glyph (cup + dot).
         var armed = false
-        if on {
-            let (onBattery, discharging, _) = batteryStatus()
-            armed = onBattery && discharging
-        }
+        let (onBattery, discharging, percent) = batteryStatus()
+        cachedOnBattery = onBattery
+        cachedBatteryPercent = percent
+        if on { armed = onBattery && discharging }
         if let button = statusItem.button {
             let newImage = on ? (armed ? armedGlyph : onGlyph) : offGlyph
             if button.image !== newImage {   // state (cup shape) changed -> swap + pulse
@@ -795,13 +838,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainCard?.active = on
         headerMark?.contentTintColor = on ? brandAccentSoft : .labelColor
         renderText()
-        updateCountdownLabel()
+        refreshLiveText()
     }
 
     // Update text labels only (no pmset subprocess; safe to call on every slider tick).
     private func renderText() {
         floorValueLabel?.stringValue = "\(batteryFloorPercent)%"
         idleHintLabel?.stringValue = idleHintText()
+        statusLabel?.stringValue = stopConditionsText()
         // Heat that already happened outranks a risk that might: it is the only one of these
         // the user may have missed entirely.
         if let critical = recentCriticalWarning() {
@@ -810,16 +854,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Outranks the history and the watchdog warning: nothing else matters while the app
             // is unable to do the one thing it exists for.
             captionLabel?.stringValue = "⚠️ Not set up. Run ./grant.sh once — the switch can't work yet."
-        } else if !isOn, let outcome = lastSessionSummary() {
-            captionLabel?.stringValue = outcome
         } else if !watchdogIsLoaded {
             captionLabel?.stringValue = isOn
                 ? "⚠️ No watchdog: if Sleepless quits, your Mac stays awake until you reboot."
                 : "⚠️ Watchdog not running. Install it: ./watchdog-agent.sh install"
         } else {
-            captionLabel?.stringValue = isOn
-                ? "Stays awake when the lid is closed. Turns off at \(batteryFloorPercent)% battery or in Low Power Mode."
-                : "Sleeps normally when you close the lid."
+            captionLabel?.stringValue = isOn ? "Keeping awake. Stops when:" : "Off — sleeping normally."
         }
     }
 
@@ -1413,13 +1453,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard onBattery, discharging else { return }
         // Hard battery floor ALWAYS wins, even over a deliberate turn-on: never drain to empty.
         if percent <= batteryFloorPercent {
-            userForcedOn = false
             turnOffForSafety("Battery low (\(percent)%)",
                              success: "Battery low (\(percent)%). Sleepless turned off.")
             return
         }
-        // Low Power Mode auto-off, UNLESS the user deliberately chose to keep awake this session.
-        if ProcessInfo.processInfo.isLowPowerModeEnabled && !userForcedOn {
+        // Opt-in only. Previously this was always armed but gated on an invisible `userForcedOn`
+        // flag that every manual turn-on set, so it could never actually fire — while the popover
+        // claimed it would. An explicit switch says what is true.
+        if stopOnLowPower, ProcessInfo.processInfo.isLowPowerModeEnabled {
             turnOffForSafety("Low Power Mode on",
                              success: "Low Power Mode on. Sleepless turned off.")
         }
