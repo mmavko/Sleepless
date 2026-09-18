@@ -391,6 +391,23 @@ write_last 25200 2400 "switch"
 [ -z "$(last_note)" ] && ok "older than 6h       -> aged out" || bad "stale outcome still reported"
 cleanup_ldomain
 
+# --- uninstall keeps the corpus --------------------------------------------------------
+# Uninstalling the app must not silently destroy months of collected evidence. The samples are
+# bulky and reproducible; the summaries are not, and they are the whole point of the journal.
+echo
+echo "uninstall preserves the journal"
+
+if grep -q 'rm -rf "\$SUPPORT_DIR"' "$REPO/uninstall.sh"; then
+  bad "uninstall.sh still wipes the whole support dir, journal included"
+else
+  ok "uninstall.sh does not blanket-delete the support dir"
+fi
+if grep -q 'sessions.jsonl' "$REPO/uninstall.sh" && grep -q 'samples.jsonl' "$REPO/uninstall.sh"; then
+  ok "uninstall.sh distinguishes summaries from samples"
+else
+  bad "uninstall.sh does not distinguish the corpus from the bulky samples"
+fi
+
 # --- boot time: the shell/Swift contract --------------------------------------------
 # The lease is keyed on boot time, and the app writes it with sysctlbyname("kern.boottime")
 # while the scripts parse sysctl(8) output. If those disagree by even one, every lease the

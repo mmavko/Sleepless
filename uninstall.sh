@@ -23,7 +23,18 @@ else
   launchctl bootout "gui/$(id -u)/$BUNDLE_ID.watchdog" 2>/dev/null || true
   rm -f "$HOME/Library/LaunchAgents/$BUNDLE_ID.watchdog.plist"
 fi
-rm -rf "$SUPPORT_DIR"
+# Remove the runtime state, but KEEP the session journal. It is the corpus the thermal design
+# is meant to be built from, it is months of evidence that cannot be regenerated, and deleting
+# months of a user's data as a side effect of "uninstall the app" is not ours to decide. The
+# per-minute samples are bulky and reproducible, so those go.
+rm -f "$SUPPORT_DIR/lease" "$SUPPORT_DIR/watchdog.sh" "$SUPPORT_DIR/leaselib.sh" \
+      "$SUPPORT_DIR/samples.jsonl" "$SUPPORT_DIR/samples.jsonl.1"
+if [ -s "$SUPPORT_DIR/sessions.jsonl" ]; then
+  echo "    kept your session journal: $SUPPORT_DIR/sessions.jsonl"
+  echo "    (delete it yourself if you want it gone)"
+else
+  rmdir "$SUPPORT_DIR" 2>/dev/null || true
+fi
 
 # 2. Restore normal sleep BEFORE removing the grant (a reboot would also reset it to 0).
 echo "==> Restoring normal sleep (disablesleep 0)"
