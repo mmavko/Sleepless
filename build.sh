@@ -67,10 +67,10 @@ cp "$REPO/Info.plist" "$CONTENTS/Info.plist"
 cp "$BIN_TMP/$APP_NAME" "$CONTENTS/MacOS/$APP_NAME"
 cp "$ICNS" "$CONTENTS/Resources/$APP_NAME.icns"
 chmod +x "$CONTENTS/MacOS/$APP_NAME"
-# Ship the grant + uninstall scripts inside the bundle so Homebrew-cask users (who get
-# only the .app) can run the one-time passwordless grant and a clean uninstall.
-cp "$REPO/grant.sh" "$REPO/uninstall.sh" "$CONTENTS/Resources/"
-chmod +x "$CONTENTS/Resources/grant.sh" "$CONTENTS/Resources/uninstall.sh"
+# grant.sh is deliberately NOT bundled. The app no longer executes it as root (see
+# showGrantInstructions in App.swift), so shipping a privileged-install script inside a
+# user-writable bundle would only re-create the surface that was removed. Run ./grant.sh
+# and ./uninstall.sh from the source folder you reviewed.
 rm -rf "$BIN_TMP"
 
 # 4. Ad-hoc sign (no Apple Developer ID needed; trust comes from building it yourself).
