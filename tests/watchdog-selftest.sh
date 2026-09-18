@@ -221,6 +221,50 @@ else
 fi
 cleanup_domain
 
+# --- hook detection ------------------------------------------------------------------
+# install.sh and `sleepless status` both rely on this to tell you the idle timeout has
+# nothing to count. A false positive is the bad direction: it would say you're covered when
+# nothing is extending the lease.
+echo
+echo "Claude Code hook detection"
+
+mkdir -p "$FAKE_HOME/.claude"
+hook_check() { HOME="$FAKE_HOME" bash "$LEASE_SH" hook >/dev/null 2>&1; }
+
+rm -f "$FAKE_HOME/.claude/settings.json"
+hook_check && bad "reported a hook with no settings file" || ok "no settings file    -> not installed"
+
+echo '{}' > "$FAKE_HOME/.claude/settings.json"
+hook_check && bad "reported a hook for empty settings" || ok "empty settings      -> not installed"
+
+echo '{ this is not json' > "$FAKE_HOME/.claude/settings.json"
+hook_check && bad "reported a hook for malformed settings" || ok "malformed settings  -> not installed"
+
+# A PreToolUse hook that calls something else entirely must not count.
+cat > "$FAKE_HOME/.claude/settings.json" <<'JSON'
+{ "hooks": { "PreToolUse": [ { "hooks": [ { "type": "command", "command": "/bin/echo hi" } ] } ] } }
+JSON
+hook_check && bad "counted an unrelated PreToolUse hook" || ok "unrelated hook      -> not installed"
+
+# Right command, wrong event: only PreToolUse drives the heartbeat.
+cat > "$FAKE_HOME/.claude/settings.json" <<'JSON'
+{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "/x/sleepless extend" } ] } ] } }
+JSON
+hook_check && bad "counted a Stop hook as the heartbeat" || ok "sleepless on Stop   -> not installed"
+
+cat > "$FAKE_HOME/.claude/settings.json" <<'JSON'
+{ "hooks": { "PreToolUse": [ { "hooks": [ { "type": "command", "command": "/x/sleepless extend" } ] } ] } }
+JSON
+hook_check && ok "PreToolUse hook     -> installed" || bad "missed a real PreToolUse hook"
+
+# settings.local.json counts too.
+rm -f "$FAKE_HOME/.claude/settings.json"
+cat > "$FAKE_HOME/.claude/settings.local.json" <<'JSON'
+{ "hooks": { "PreToolUse": [ { "hooks": [ { "type": "command", "command": "/x/sleepless", "args": ["extend"] } ] } ] } }
+JSON
+hook_check && ok "settings.local.json -> installed (args form)" || bad "missed the hook in settings.local.json"
+rm -f "$FAKE_HOME/.claude/settings.local.json"
+
 # --- boot time: the shell/Swift contract --------------------------------------------
 # The lease is keyed on boot time, and the app writes it with sysctlbyname("kern.boottime")
 # while the scripts parse sysctl(8) output. If those disagree by even one, every lease the

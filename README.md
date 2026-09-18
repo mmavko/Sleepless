@@ -83,6 +83,7 @@ this machine, or `.claude/settings.json` for one project:
 ```
 
 Then set **Stop after no tool calls** in the popover. That's the whole integration.
+`./sleepless hook` tells you whether it's wired up, and `./install.sh` reminds you if it isn't.
 
 - **`extend` never arms keep-awake**, only prolongs it. You still flip the switch deliberately
   when you're about to close the lid; the hook only decides *when it ends*. Otherwise any
@@ -92,9 +93,20 @@ Then set **Stop after no tool calls** in the popover. That's the whole integrati
   refcounting, no locking.
 - **No `Stop` or `SessionEnd` hook.** `Stop` fires at the end of *every turn*, and `SessionEnd`
   often never fires at all. Expiry is the mechanism; release is only a courtesy.
-- **Pick a timeout longer than your longest single tool call.** A 30-minute build fires no hook
-  until it finishes, and `PreToolUse` fires before it — so a 20m timeout covers it, at the cost
-  of up to 20 minutes of idle overhang. The battery floor and the auto-off timer still bound that.
+- **Subagents count.** A subagent's tool calls fire the same configured `PreToolUse` hooks as
+  the main conversation, with `agent_id` / `agent_type` added to the input. So a long
+  delegated job keeps the lease alive without any extra configuration.
+- **Pick a timeout longer than your longest gap between tool calls.** A 30-minute build fires no
+  hook until it finishes, and `PreToolUse` fires before it — so a 20m timeout covers it, at the
+  cost of up to 20 minutes of idle overhang. The battery floor and the auto-off timer bound that.
+- **Background commands are the one real gap.** `PostToolUse` fires when a background command is
+  *started*, not while it runs — so if Claude kicks off a 40-minute background build and then
+  waits, nothing fires for that whole stretch. Before something like that, hold the lease by
+  hand:
+
+  ```bash
+  ./sleepless extend 2h
+  ```
 
 `sleepless status` shows all three things that matter:
 

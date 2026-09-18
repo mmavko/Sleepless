@@ -58,5 +58,9 @@ echo ""
 echo "✅ Installed. The coffee cup is in your menu bar — click it to toggle."
 echo "   Turn ON, close the lid: your Mac stays awake on battery (auto-off at the floor you set)."
 echo "   A watchdog agent clears the flag if the app dies while it is ON."
+echo ""
+# Non-fatal: the hook is optional, and only matters once you use the idle timeout.
+"$REPO/sleepless" hook || true
+echo ""
 echo "   Check it any time:  ./watchdog-agent.sh status"
 echo "   To remove everything (including the grant): ./uninstall.sh"

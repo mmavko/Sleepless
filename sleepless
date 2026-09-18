@@ -3,6 +3,7 @@
 #
 #   sleepless extend [duration]   push the lease out to now + duration (never shortens)
 #   sleepless status              what the Mac is doing and why
+#   sleepless hook                is the Claude Code hook wired up? prints it if not
 #   sleepless off                 restore normal sleep now
 #   sleepless release             drop the lease only; the watchdog turns it off next tick
 #
@@ -113,6 +114,66 @@ cmd_off() {
   fi
 }
 
+# Is a PreToolUse hook actually calling us? Without one the idle timeout never sees a tool
+# call, so it would turn keep-awake off on schedule no matter how hard Claude is working.
+# Only user-level settings can be checked from here; project-level ones live in whatever
+# repo you happen to be in, so a "not found" is a reminder, never an error.
+HOOK_FILES=("$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json")
+
+hook_installed_in() {
+  /usr/bin/python3 - "$1" <<'PY' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+entries = (data.get("hooks") or {}).get("PreToolUse") or []
+for entry in entries:
+    for hook in (entry.get("hooks") or []):
+        command = " ".join([str(hook.get("command", ""))] + [str(a) for a in (hook.get("args") or [])])
+        if "sleepless" in command and "extend" in command:
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
+hook_location() {
+  local f
+  for f in "${HOOK_FILES[@]}"; do
+    [ -f "$f" ] || continue
+    if hook_installed_in "$f"; then echo "$f"; return 0; fi
+  done
+  return 1
+}
+
+cmd_hook() {
+  local found
+  if found="$(hook_location)"; then
+    echo "✅ PreToolUse hook found in $found"
+    echo "   Claude Code tool calls (including subagents') will extend the lease."
+    return 0
+  fi
+  cat <<HOOKEOF
+⚠️  No PreToolUse hook found in ~/.claude/settings.json.
+
+Without it the "Stop after no tool calls" setting has nothing to count, so it will turn
+keep-awake off on schedule however hard Claude is working. Add this to
+~/.claude/settings.json (all sessions on this Mac) or a project's .claude/settings.json:
+
+  {
+    "hooks": {
+      "PreToolUse": [
+        { "hooks": [{ "type": "command", "command": "$SCRIPT_DIR/sleepless extend" }] }
+      ]
+    }
+  }
+
+Project-level settings can't be checked from here, so ignore this if you set it up there.
+HOOKEOF
+  return 1
+}
+
 cmd_status() {
   local state
   if flag_is_set; then
@@ -132,6 +193,13 @@ cmd_status() {
   else
     echo "watchdog:   NOT RUNNING — a crash would leave this Mac awake until reboot"
   fi
+
+  local found
+  if found="$(hook_location)"; then
+    echo "claude hook: installed ($found)"
+  else
+    echo "claude hook: not in user settings — run 'sleepless hook' (may be set per-project)"
+  fi
   flag_is_set
 }
 
@@ -140,8 +208,9 @@ case "${1:-}" in
   release) cmd_release ;;
   off)     cmd_off ;;
   status)  cmd_status ;;
+  hook)    cmd_hook ;;
   -h|--help|help)
     sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) echo "usage: sleepless extend [duration] | status | off | release" >&2; exit 64 ;;
+  *) echo "usage: sleepless extend [duration] | status | hook | off | release" >&2; exit 64 ;;
 esac

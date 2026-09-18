@@ -191,9 +191,29 @@ keeps calling tools holds the Mac awake indefinitely — on battery the floor ca
 nothing does. The idle setting is also opt-in (off by default), because until a hook is wired
 nothing would ever extend the lease and every session would look idle.
 
-**Cost, stated plainly:** the timeout must exceed the longest single tool call, since a long
-build fires no hook until it finishes. `PreToolUse` firing *before* the call covers that, at the
-price of up to one timeout of idle overhang after work stops — bounded by the floor and the timer.
+**Subagents were a worry and turned out not to be.** Their tool calls fire the same configured
+`PreToolUse` hooks as the main conversation (the input gains `agent_id` and `agent_type`), so
+delegated work holds the lease with no extra configuration. Worth having checked: if it had gone
+the other way, a long subagent run with an idle main loop would have looked exactly like "Claude
+stopped working", and the Mac would have slept in the middle of it.
+
+**Cost, stated plainly.** The timeout must exceed the longest *gap between tool calls*, since a
+long build fires no hook until it finishes. `PreToolUse` firing before the call covers that, at
+the price of up to one timeout of idle overhang after work stops — bounded by the floor and the
+timer.
+
+**The one real gap: background commands.** `PostToolUse` fires when a background command is
+started, not while it runs. A long background job with the main loop waiting on it produces no
+hooks at all. There is no "still running" event to hang a heartbeat on, so the answer is the
+CLI's manual escape hatch — `sleepless extend 2h` before kicking one off — rather than more
+machinery.
+
+**Detection, because a missing hook fails silently.** Without a `PreToolUse` hook the idle
+timeout has nothing to count and turns keep-awake off on schedule however hard Claude is working
+— and nothing in that sequence looks like an error. So `sleepless hook` checks the user-level
+settings files, `sleepless status` reports it, `install.sh` reminds, and the popover's hint line
+shows the last time a tool call was actually seen. Project-level settings can't be checked from
+outside the project, so a negative is always a reminder, never an error.
 
 ## Resolved while building
 
