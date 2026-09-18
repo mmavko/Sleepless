@@ -333,6 +333,64 @@ done
 [ -z "$missing" ] && ok "summary keys agree across Swift and the report" \
                    || bad "journal key contract broken:$missing"
 
+# --- last-session outcome --------------------------------------------------------------
+# The end-of-session notification fires while the lid is shut, so by definition nobody sees
+# it. The outcome is persisted and repeated on the lid-open edge; this covers the terminal
+# half of that, and in particular that the reason survives intact rather than being flattened
+# to "off" — "which safety net stopped it" is the entire question being asked.
+echo
+echo "last-session outcome"
+
+LDOMAIN="com.sleepless.lasttest.$$"
+cleanup_ldomain() {
+  defaults delete "$LDOMAIN" >/dev/null 2>&1 || true
+  rm -f "$HOME/Library/Preferences/$LDOMAIN.plist"
+}
+trap 'cleanup_domain; cleanup_ldomain; rm -rf "$TMP"' EXIT
+
+last_note() {
+  SLEEPLESS_SELFTEST=1 SLEEPLESS_DEFAULTS_DOMAIN="$LDOMAIN" HOME="$FAKE_HOME" \
+    bash "$LEASE_SH" status 2>/dev/null | grep -i "last run" || true
+}
+write_last() { # agoSec durationSec reason
+  defaults write "$LDOMAIN" lastSessionEndedAt -int $(( $(date +%s) - $1 )) >/dev/null 2>&1
+  defaults write "$LDOMAIN" lastSessionDurationSec -int "$2" >/dev/null 2>&1
+  defaults write "$LDOMAIN" lastSessionReason -string "$3" >/dev/null 2>&1
+}
+
+cleanup_ldomain
+[ -z "$(last_note)" ] && ok "no history          -> silent" || bad "reported a run with no history"
+
+write_last 60 2400 "No tool calls for 20 min"
+case "$(last_note)" in
+  *"40 min"*"No tool calls for 20 min"*) ok "idle timeout        -> duration + reason kept" ;;
+  *) bad "idle-timeout outcome mangled: $(last_note)" ;;
+esac
+
+write_last 60 5400 "Battery low (14%)"
+case "$(last_note)" in
+  *"90 min"*"Battery low (14%)"*) ok "battery floor       -> duration + reason kept" ;;
+  *) bad "battery-floor outcome mangled: $(last_note)" ;;
+esac
+
+# The most important one to get right: the app died and the watchdog cleaned up. Nothing else
+# tells the user this happened.
+write_last 60 7200 "crash"
+case "$(last_note)" in
+  *"watchdog restored sleep"*) ok "crash               -> says the watchdog saved it" ;;
+  *) bad "crash outcome not explained: $(last_note)" ;;
+esac
+
+write_last 60 900 "switch"
+case "$(last_note)" in
+  *"you turned it off"*) ok "manual off          -> phrased for a human" ;;
+  *) bad "manual-off outcome mangled: $(last_note)" ;;
+esac
+
+write_last 25200 2400 "switch"
+[ -z "$(last_note)" ] && ok "older than 6h       -> aged out" || bad "stale outcome still reported"
+cleanup_ldomain
+
 # --- boot time: the shell/Swift contract --------------------------------------------
 # The lease is keyed on boot time, and the app writes it with sysctlbyname("kern.boottime")
 # while the scripts parse sysctl(8) output. If those disagree by even one, every lease the

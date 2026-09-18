@@ -272,6 +272,26 @@ critical_note() {
   fi
 }
 
+# How the last keep-awake session ended. Worth showing at a terminal for the same reason the
+# app shows it in the popover: the notification fired while the lid was shut.
+last_session_note() {
+  local ended dur reason age
+  ended="$(defaults read "$BUNDLE_ID" lastSessionEndedAt 2>/dev/null || true)"
+  case "$ended" in ''|*[!0-9.]*) return 1 ;; esac
+  ended="${ended%%.*}"
+  age=$(( $(date +%s) - ended ))
+  [ "$age" -ge 0 ] && [ "$age" -lt 21600 ] || return 1
+  dur="$(defaults read "$BUNDLE_ID" lastSessionDurationSec 2>/dev/null || echo 0)"
+  reason="$(defaults read "$BUNDLE_ID" lastSessionReason 2>/dev/null || echo '?')"
+  case "$reason" in
+    switch)   reason="you turned it off" ;;
+    quit)     reason="Sleepless quit" ;;
+    external) reason="the watchdog stepped in" ;;
+    crash)    reason="Sleepless stopped unexpectedly; the watchdog restored sleep" ;;
+  esac
+  printf 'last run:    kept awake %d min, then off: %s\n' "$(( dur / 60 ))" "$reason"
+}
+
 cmd_status() {
   local state
   if flag_is_set; then
@@ -298,6 +318,7 @@ cmd_status() {
   else
     echo "claude hook: not in user settings — run 'sleepless hook' (may be set per-project)"
   fi
+  last_session_note || true
   critical_note || true
   flag_is_set
 }

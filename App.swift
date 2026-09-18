@@ -78,6 +78,19 @@ private let criticalAtKey = "lastCriticalAt"
 private let criticalLidClosedKey = "lastCriticalLidClosed"
 private let criticalWarningTTL: TimeInterval = 24 * 60 * 60
 
+// How the last keep-awake session ended. The end-of-session notification fires while the lid
+// is shut, so by definition you are not there to see it — the whole point of the app. Persist
+// the outcome, announce it on the lid-open edge, and keep it in the popover for a few hours.
+private let lastEndedAtKey = "lastSessionEndedAt"
+private let lastDurationKey = "lastSessionDurationSec"
+private let lastReasonKey = "lastSessionReason"
+private let lastLidClosedKey = "lastSessionLidClosed"
+private let lastAnnouncedKey = "lastSessionAnnounced"
+// Set while a session is open, cleared when it closes. Still set at launch means the previous
+// run died with keep-awake on — the case the watchdog exists for, and the one most worth saying.
+private let openSessionKey = "openSessionStartedAt"
+private let lastSessionTTL: TimeInterval = 6 * 60 * 60
+
 // Battery-floor config (user-adjustable via the popover slider; persisted in UserDefaults).
 private let floorKey = "batteryFloorPercent"
 private let floorDefault = 15
@@ -254,6 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentSize = NSSize(width: popoverWidth, height: popoverHeight)
         popover.contentViewController = makeContentController()
 
+        recoverAbandonedSession()   // did the previous run die with keep-awake on?
         refresh()   // reflect TRUE system state on launch (never a stale assumption)
         startClamshellObserver()
         NotificationCenter.default.addObserver(self, selector: #selector(thermalChanged),
@@ -784,6 +798,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the user may have missed entirely.
         if let critical = recentCriticalWarning() {
             captionLabel?.stringValue = critical
+        } else if !isOn, let outcome = lastSessionSummary() {
+            captionLabel?.stringValue = outcome
         } else if !watchdogIsLoaded {
             captionLabel?.stringValue = isOn
                 ? "⚠️ No watchdog: if Sleepless quits, your Mac stays awake until you reboot."
@@ -892,6 +908,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return "⚠️ Critical heat \(when)\(lidClosed ? ", lid closed" : ""). Run: sleepless report"
     }
 
+    private func formatDuration(_ seconds: Int) -> String {
+        let h = seconds / 3600, m = (seconds % 3600) / 60
+        if h > 0 { return m > 0 ? "\(h)h \(m)m" : "\(h)h" }
+        return m > 0 ? "\(m) min" : "\(seconds)s"
+    }
+
+    // The safety nets already phrase themselves as sentences ("Battery low (14%)", "No tool
+    // calls for 20 min"); only the bookkeeping reasons need translating.
+    private func friendlyReason(_ reason: String) -> String {
+        switch reason {
+        case "switch":   return "you turned it off"
+        case "quit":     return "Sleepless quit"
+        case "external": return "the watchdog stepped in — Sleepless was no longer renewing"
+        case "crash":    return "Sleepless stopped unexpectedly; the watchdog restored sleep"
+        default:         return reason
+        }
+    }
+
+    private func rememberSessionOutcome(durationSec: Int, reason: String, lidClosed: Bool) {
+        let defaults = UserDefaults.standard
+        defaults.set(Date().timeIntervalSince1970, forKey: lastEndedAtKey)
+        defaults.set(durationSec, forKey: lastDurationKey)
+        defaults.set(reason, forKey: lastReasonKey)
+        defaults.set(lidClosed, forKey: lastLidClosedKey)
+        defaults.set(false, forKey: lastAnnouncedKey)
+    }
+
+    // "Kept awake 40 min, then off: no tool calls for 20 min."
+    private func lastSessionSummary() -> String? {
+        let defaults = UserDefaults.standard
+        let endedAt = defaults.double(forKey: lastEndedAtKey)
+        guard endedAt > 0, Date().timeIntervalSince1970 - endedAt < lastSessionTTL,
+              let reason = defaults.string(forKey: lastReasonKey) else { return nil }
+        let duration = formatDuration(defaults.integer(forKey: lastDurationKey))
+        return "Kept awake \(duration), then off: \(friendlyReason(reason))"
+    }
+
+    // Announce on the lid-open edge — the moment you are actually back — and only once, and
+    // only for a session that ended while you were away.
+    private func announceLastSessionIfDue() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: lastAnnouncedKey),
+              defaults.bool(forKey: lastLidClosedKey),
+              let summary = lastSessionSummary() else { return }
+        defaults.set(true, forKey: lastAnnouncedKey)
+        notify(summary)
+        renderText()
+    }
+
+    // A session that never got to write its own ending: the app died while keep-awake was on.
+    // Recovered at launch, because this is exactly the failure the watchdog exists for and the
+    // user has no other way to learn it happened.
+    private func recoverAbandonedSession() {
+        let defaults = UserDefaults.standard
+        let startedAt = defaults.double(forKey: openSessionKey)
+        guard startedAt > 0 else { return }
+        defaults.removeObject(forKey: openSessionKey)
+        let duration = max(0, Int(Date().timeIntervalSince1970 - startedAt))
+        appendJournal(["ev": "summary", "t": Int(Date().timeIntervalSince1970),
+                       "reason": "crash", "durationSec": duration, "samples": 0,
+                       "maxThermal": "unknown", "secondsHot": 0,
+                       "lidClosedSamples": 0, "onBatterySamples": 0,
+                       "batteryStart": -1, "batteryEnd": -1, "batteryDropPct": 0],
+                      to: summariesURL)
+        rememberSessionOutcome(durationSec: duration, reason: "crash", lidClosed: true)
+        notify("Sleepless stopped unexpectedly during a \(formatDuration(duration)) session. The watchdog restored normal sleep.")
+    }
+
     private func thermalName(_ state: ProcessInfo.ThermalState) -> String {
         switch state {
         case .nominal:  return "nominal"
@@ -986,6 +1070,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessionStart = Date()
         sessionSamples = []
         warnedCriticalThisSession = false
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: openSessionKey)
         recordSample("arm")
     }
 
@@ -1000,6 +1085,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let worst = samples.max(by: { thermalRank($0.thermal) < thermalRank($1.thermal) }) else { return }
 
         let duration = Int(Date().timeIntervalSince(start))
+        UserDefaults.standard.removeObject(forKey: openSessionKey)
         let closedSamples = samples.filter { $0.lidClosed }
         let batteries = samples.map { $0.battery }
         let onBatterySamples = samples.filter { !$0.onAC }
@@ -1019,6 +1105,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "batteryEnd": batteries.last ?? -1,
             "batteryDropPct": drop,
         ], to: summariesURL)
+
+        // Remember how this ended. If the lid was shut when it happened, the notification below
+        // lands on a closed laptop, so announceLastSessionIfDue() repeats it when the lid opens.
+        rememberSessionOutcome(durationSec: duration, reason: reason, lidClosed: lidClosed)
 
         // The risky shape is heat with the lid CLOSED — on a desk with the lid open, a warm
         // Mac is just a working Mac. Report that combination, not heat on its own.
@@ -1268,6 +1358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func clamshellChanged(closed: Bool) {
         defer { lidClosed = closed }
+        if !closed, lidClosed { announceLastSessionIfDue() }   // closed -> open: you are back
         guard closed, !lidClosed else { return }          // only the open -> closed edge
         guard isOn else { return }                        // not keeping awake: macOS handles the lid
         guard !externalDisplayPresent() else { return }   // clamshell mode: the external stays on

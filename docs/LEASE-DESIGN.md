@@ -159,6 +159,18 @@ were not there to see is lost, and this app exists precisely for when you are *n
 so the event is also persisted and shown in the popover and `sleepless status` for 24 hours,
 ageing out by itself.
 
+**A session's ending has to survive the closed lid.** The same argument as `.critical`, one
+level up: the end-of-session notification fires while the lid is shut, so by construction nobody
+sees it. The outcome is persisted, announced on the lid-open edge, and kept in the popover and
+`sleepless status` for six hours — long enough to find after a nap, short enough not to
+permanently mask the watchdog warning underneath it in the caption.
+
+The reason is carried through verbatim rather than flattened to "off", because *which* net
+stopped it is the entire question being asked. Two endings are special: `external` (the watchdog
+cleared the flag — the app was no longer renewing) and `crash` (the app died with keep-awake on,
+recovered at next launch from a session that never wrote its own ending). Nothing else tells the
+user the dead-man switch actually fired.
+
 **The corpus is never rotated.** Summaries (one line per session) and samples (per minute) are
 separate streams for that reason: a single capped file discards the oldest sessions first, and
 the rare session that cooked in a bag is the one the whole exercise exists to capture. Only the

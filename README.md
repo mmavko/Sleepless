@@ -124,6 +124,28 @@ tells you whether it's wired up, and `./install.sh` reminds you if it isn't.
 ./sleepless status
 ```
 
+## Coming back to a closed laptop
+
+You armed it, shut the lid, walked away. When you open it again you can see how the agent
+fared — this tells you how the *keep-awake* fared:
+
+```
+Kept awake 40 min, then off: No tool calls for 20 min
+```
+
+It fires as a notification on the **lid-open edge**, which is the moment you're actually back,
+and stays in the popover and `sleepless status` for six hours. The end-of-session notification
+on its own is no use here: it fires while the lid is shut, so nobody sees it.
+
+Every ending names itself — the idle timeout, the battery floor, Low Power Mode, the auto-off
+timer, or you. Two are worth calling out:
+
+- **"the watchdog stepped in"** — Sleepless stopped renewing its lease and the dead-man switch
+  restored normal sleep.
+- **"Sleepless stopped unexpectedly"** — the app died with keep-awake on. Detected at next
+  launch from a session that never wrote its own ending. Nothing else would tell you this
+  happened, which is the whole reason the watchdog exists.
+
 ## What actually happened: `sleepless report`
 
 Thermal protection is the one safety net whose thresholds would be **guessed**, and a guessed
