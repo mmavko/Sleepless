@@ -36,7 +36,9 @@
 //   File MUST be named App.swift and compiled -parse-as-library so the
 //   @main enum + @MainActor static main() entry is Swift-6 isolation-safe.
 import AppKit
+import CoreGraphics
 import ServiceManagement
+import notify
 
 // MARK: - Tunables
 private let pollInterval: TimeInterval = 60
@@ -163,6 +165,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Auto-off timer (in-memory; dies on quit, never survives a reboot)
     private var autoOffMinutes = 0           // 0 = none (stay on until off), 60, or 120
+    private var clamshellToken: Int32 = NOTIFY_TOKEN_INVALID
+    private var lidClosed = false
     private var keepAwakeTimer: Timer?       // one-shot: flips sleep back on when it fires
     private var countdownTicker: Timer?      // 1 Hz label refresh, only while the popover is open
     private var timerEndDate: Date?
@@ -185,6 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = makeContentController()
 
         refresh()   // reflect TRUE system state on launch (never a stale assumption)
+        startClamshellObserver()
         timer = Timer.scheduledTimer(timeInterval: pollInterval, target: self,
                                      selector: #selector(poll), userInfo: nil, repeats: true)
     }
@@ -645,6 +650,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return (process.terminationStatus,
                 String(data: outData, encoding: .utf8) ?? "",
                 String(data: errData, encoding: .utf8) ?? "")
+    }
+
+    // MARK: - Lid-close display power-off — Feature 4
+    //
+    // With SleepDisabled set, closing the lid no longer takes the normal sleep path, so the
+    // built-in panel can stay powered: a lit screen inside a closed bag, burning battery and
+    // making heat. (It also means the Mac never locks on lid close, because the password prompt
+    // hangs off sleep / display-off.) Asking for display sleep explicitly restores both.
+    //
+    // `pmset displaysleepnow` is an ACTION, not a setting — per pmset(1) only settings need root —
+    // so this runs unprivileged and needs NO extra entry in the sudoers grant.
+    //
+    // Event-driven via the clamshell darwin notification: no polling, and it fires even while
+    // another process holds a NoDisplaySleep assertion.
+    private func startClamshellObserver() {
+        let name = "com.apple.system.powermanagement.clamshellstate"
+        let status = notify_register_dispatch(name, &clamshellToken, DispatchQueue.main) { [weak self] token in
+            var state: UInt64 = 0
+            guard notify_get_state(token, &state) == UInt32(NOTIFY_STATUS_OK) else {
+                NSLog("Sleepless: couldn't read clamshell state")
+                return
+            }
+            MainActor.assumeIsolated { self?.clamshellChanged(closed: state != 0) }
+        }
+        guard status == UInt32(NOTIFY_STATUS_OK) else {
+            NSLog("Sleepless: clamshell observer unavailable (status %d); lid-close display-off disabled", status)
+            clamshellToken = NOTIFY_TOKEN_INVALID
+            return
+        }
+        var state: UInt64 = 0
+        if notify_get_state(clamshellToken, &state) == UInt32(NOTIFY_STATUS_OK) { lidClosed = state != 0 }
+    }
+
+    private func clamshellChanged(closed: Bool) {
+        defer { lidClosed = closed }
+        guard closed, !lidClosed else { return }          // only the open -> closed edge
+        guard isOn else { return }                        // not keeping awake: macOS handles the lid
+        guard !externalDisplayPresent() else { return }   // clamshell mode: the external stays on
+        let out = runCapture("/usr/bin/pmset", ["displaysleepnow"])
+        if !out.isEmpty { NSLog("Sleepless: displaysleepnow said: %@", out) }
+    }
+
+    private func externalDisplayPresent() -> Bool {
+        for screen in NSScreen.screens {
+            guard let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+            else { continue }
+            if CGDisplayIsBuiltin(id) == 0 { return true }
+        }
+        return false
     }
 
     // MARK: - Battery + Low-Power-Mode safety nets (silent; no extra UI) — Feature 3
