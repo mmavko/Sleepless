@@ -432,6 +432,69 @@ else
   bad "uninstall would leave the renamed watchdog behind"
 fi
 
+# --- hook install / remove -------------------------------------------------------------
+# This writes to ~/.claude/settings.json, which belongs to Claude Code and to whatever else
+# the user has configured there. Every case below is about not damaging that file: merge
+# rather than overwrite, refuse rather than guess, and leave nothing behind on removal.
+echo
+echo "hook install/remove"
+
+HHOME="$TMP/hookhome"; mkdir -p "$HHOME/.claude"
+HSET="$HHOME/.claude/settings.json"
+hk() { HOME="$HHOME" bash "$LEASE_SH" hook "$@" >/dev/null 2>&1; }
+
+rm -f "$HSET"
+hk --install && [ -f "$HSET" ] && ok "install     -> creates settings.json" || bad "install did not create settings.json"
+hk --install && ok "install     -> idempotent" || bad "second install failed"
+
+# The one that would ruin someone's day: clobbering unrelated configuration.
+rm -f "$HSET" "$HHOME/.claude/"*backup* 2>/dev/null
+cat > "$HSET" <<'JSON'
+{"model":"opus","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/bin/echo mine"}]}],"Stop":[{"hooks":[{"type":"command","command":"/bin/echo done"}]}]}}
+JSON
+hk --install
+if /usr/bin/python3 -c "
+import json,sys
+d=json.load(open('$HSET'))
+pre=d['hooks']['PreToolUse']
+assert d['model']=='opus'
+assert any(h.get('command')=='/bin/echo mine' for e in pre for h in e['hooks'])
+assert d['hooks']['Stop'][0]['hooks'][0]['command']=='/bin/echo done'
+assert any('sleepless' in h.get('command','') for e in pre for h in e['hooks'])
+" 2>/dev/null; then ok "install     -> merges, keeps other keys and hooks"; else bad "install clobbered existing settings"; fi
+
+[ -n "$(ls "$HHOME/.claude/" 2>/dev/null | grep backup)" ] && ok "install     -> backs the file up" || bad "no backup was written"
+
+hk --remove
+if /usr/bin/python3 -c "
+import json
+d=json.load(open('$HSET'))
+pre=d['hooks']['PreToolUse']
+assert not any('sleepless' in h.get('command','') for e in pre for h in e['hooks'])
+assert any(h.get('command')=='/bin/echo mine' for e in pre for h in e['hooks'])
+assert d['hooks']['Stop']
+" 2>/dev/null; then ok "remove      -> drops ours, keeps theirs"; else bad "remove damaged the file"; fi
+hk --remove && ok "remove      -> idempotent" || bad "second remove failed"
+
+# Refuse rather than guess. A half-understood settings.json must come through untouched.
+printf '{ this is not json\n' > "$HSET"
+HOME="$HHOME" bash "$LEASE_SH" hook --install >/dev/null 2>&1
+if [ "$(cat "$HSET")" = "{ this is not json" ]; then
+  ok "malformed   -> refuses, file untouched"
+else
+  bad "malformed settings.json was modified"
+fi
+
+# The step is useless if it prints after the app launches and macOS fires its notification.
+if /usr/bin/python3 -c "
+import sys
+t=open('$REPO/install.sh').read()
+sys.exit(0 if t.index('Add it now?') < t.index('open \"\$APP\"') else 1)
+"; then ok "install.sh  -> asks before launching the app"; else bad "hook prompt comes after the app launches"; fi
+
+grep -q 'hook --remove' "$REPO/uninstall.sh" && ok "uninstall   -> removes the hook" \
+  || bad "uninstall leaves a hook pointing at a deleted script"
+
 # --- boot time: the shell/Swift contract --------------------------------------------
 # The lease is keyed on boot time, and the app writes it with sysctlbyname("kern.boottime")
 # while the scripts parse sysctl(8) output. If those disagree by even one, every lease the

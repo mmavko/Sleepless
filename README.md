@@ -109,6 +109,17 @@ this machine, or `.claude/settings.json` for one project:
 }
 ```
 
+`./uninstall.sh` takes it back out — a hook left pointing at a deleted script would fire on
+every tool call, forever.
+
+`./install.sh` offers to add it for you (merged into your existing settings, backed up first),
+or add it yourself any time:
+
+```bash
+./sleepless hook --install     # merge it in    (--remove takes it back out)
+./sleepless hook               # just check
+```
+
 Then set **Stop when Claude Code goes idle** in the popover.
 
 **The hook is optional.** Without it the app falls back to watching Claude Code transcript

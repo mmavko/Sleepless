@@ -37,26 +37,33 @@ else
   rmdir "$SUPPORT_DIR" 2>/dev/null || true
 fi
 
-# 2. Restore normal sleep BEFORE removing the grant (a reboot would also reset it to 0).
+# 2. Remove the Claude Code hook. A hook left pointing at a script we are about to delete
+# would fire on EVERY tool call, forever, running a command that no longer exists.
+echo "==> Removing the Claude Code hook, if we installed one"
+if [ -x "$REPO/sleepless" ]; then
+  "$REPO/sleepless" hook --remove 2>&1 | sed 's/^/    /' || true
+fi
+
+# 3. Restore normal sleep BEFORE removing the grant (a reboot would also reset it to 0).
 echo "==> Restoring normal sleep (disablesleep 0)"
 sudo -n /usr/bin/pmset -a disablesleep 0 2>/dev/null || sudo /usr/bin/pmset -a disablesleep 0 || true
 
-# 3. Quit the app + remove the login item.
+# 4. Quit the app + remove the login item.
 echo "==> Quitting app + removing login item"
 osascript -e "quit app \"$APP_NAME\"" 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/$BUNDLE_ID" 2>/dev/null || true
 rm -f "$LAUNCH_AGENT"
 
-# 4. Remove the app.
+# 5. Remove the app.
 echo "==> Removing $APP"
 rm -rf "$APP"
 
-# 5. Remove the passwordless grant (password required, by design — you're touching sudo).
+# 6. Remove the passwordless grant (password required, by design — you're touching sudo).
 echo "==> Removing passwordless grant (you may be asked for your password)"
 sudo rm -f "$SUDOERS_DST"
 sudo visudo -c >/dev/null && echo "    sudoers still parses cleanly"
 
-# 6. Proof of revocation: the previously-passwordless command must now PROMPT.
+# 7. Proof of revocation: the previously-passwordless command must now PROMPT.
 echo "==> Verifying the grant is gone"
 sudo -k
 if sudo -n /usr/bin/pmset -a disablesleep 0 2>/dev/null; then

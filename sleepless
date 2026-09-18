@@ -3,7 +3,8 @@
 #
 #   sleepless extend [duration]   push the lease out to now + duration (never shortens)
 #   sleepless status              what the Mac is doing and why
-#   sleepless hook                is the Claude Code hook wired up? prints it if not
+#   sleepless hook [--install|--remove]
+#                                 check, add or remove the Claude Code PreToolUse hook
 #   sleepless report              what past keep-awake sessions actually did (heat, battery)
 #   sleepless off                 restore normal sleep now
 #   sleepless release             drop the lease only; the watchdog turns it off next tick
@@ -148,7 +149,88 @@ hook_location() {
   return 1
 }
 
+USER_SETTINGS="$HOME/.claude/settings.json"
+
+# Add or remove our PreToolUse entry in the user's settings.json, MERGING rather than
+# overwriting: this file belongs to Claude Code and to every other tool the user has set up
+# there, so it is backed up first, edited through a JSON round-trip, validated by re-parsing,
+# and moved into place atomically. Refuses rather than guesses if the file is not valid JSON.
+edit_user_hook() {
+  /usr/bin/python3 - "$USER_SETTINGS" "$1" "$SCRIPT_DIR/sleepless extend" <<'PY'
+import json, os, shutil, sys, time
+
+path, action, command = sys.argv[1], sys.argv[2], sys.argv[3]
+
+data = {}
+if os.path.exists(path) and os.path.getsize(path) > 0:
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except ValueError as exc:
+        print("error: %s is not valid JSON (%s)." % (path, exc), file=sys.stderr)
+        print("       Refusing to touch it. Add or remove the hook by hand.", file=sys.stderr)
+        sys.exit(2)
+if not isinstance(data, dict):
+    print("error: %s is not a JSON object. Refusing to touch it." % path, file=sys.stderr)
+    sys.exit(2)
+
+def is_ours(hook):
+    text = " ".join([str(hook.get("command", ""))] + [str(a) for a in (hook.get("args") or [])])
+    return "sleepless" in text and "extend" in text
+
+hooks = data.setdefault("hooks", {})
+entries = hooks.setdefault("PreToolUse", [])
+present = any(is_ours(h) for e in entries for h in (e.get("hooks") or []))
+
+if action == "--install":
+    if present:
+        print("already installed; nothing to do.")
+        sys.exit(0)
+    entries.append({"hooks": [{"type": "command", "command": command}]})
+else:
+    if not present:
+        print("no sleepless hook present; nothing to remove.")
+        sys.exit(0)
+    for entry in entries:
+        entry["hooks"] = [h for h in (entry.get("hooks") or []) if not is_ours(h)]
+    hooks["PreToolUse"] = [e for e in entries if e.get("hooks")]
+    # Leave no empty scaffolding behind that we created.
+    if not hooks["PreToolUse"]:
+        del hooks["PreToolUse"]
+    if not hooks:
+        del data["hooks"]
+
+if os.path.exists(path):
+    backup = "%s.sleepless-backup-%d" % (path, int(time.time()))
+    shutil.copy2(path, backup)
+    print("backed up to %s" % backup)
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+tmp = path + ".sleepless-tmp"
+with open(tmp, "w") as handle:
+    json.dump(data, handle, indent=2)
+    handle.write("\n")
+with open(tmp) as handle:          # re-parse before it replaces anything real
+    json.load(handle)
+os.replace(tmp, path)
+print("%s %s" % ("installed into" if action == "--install" else "removed from", path))
+PY
+}
+
 cmd_hook() {
+  case "${1:-}" in
+    --install)
+      edit_user_hook --install || return $?
+      echo "   Claude Code tool calls (including subagents') will now extend the lease."
+      echo "   Already-running sessions pick this up without a restart."
+      return 0
+      ;;
+    --remove)
+      edit_user_hook --remove
+      return $?
+      ;;
+  esac
+
   local found
   if found="$(hook_location)"; then
     echo "✅ PreToolUse hook found in $found"
@@ -335,10 +417,10 @@ case "${1:-}" in
   release) cmd_release ;;
   off)     cmd_off ;;
   status)  cmd_status ;;
-  hook)    cmd_hook ;;
+  hook)    cmd_hook "${2:-}" ;;
   report)  cmd_report ;;
   -h|--help|help)
     sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) echo "usage: sleepless extend [duration] | status | hook | report | off | release" >&2; exit 64 ;;
+  *) echo "usage: sleepless extend [duration] | status | hook [--install|--remove] | report | off | release" >&2; exit 64 ;;
 esac

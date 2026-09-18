@@ -24,7 +24,10 @@ echo "  3. Install the watchdog LaunchAgent (~/Library/LaunchAgents), which clea
 echo "     disablesleep if the app dies while it is set. It runs as you and uses the"
 echo "     grant above — no extra privilege. Without it, a crash while ON leaves your"
 echo "     Mac awake until you reboot."
-echo "  4. Remove the obsolete script-installed login item, if present."
+echo "  4. Offer to add a Claude Code PreToolUse hook to ~/.claude/settings.json, so"
+echo "     keep-awake ends when Claude Code goes quiet. Asked separately; merged into"
+echo "     your existing settings, backed up first, and removable with ./uninstall.sh."
+echo "  5. Remove the obsolete script-installed login item, if present."
 echo "     Use Sleepless's Launch at login switch to control the native login item."
 echo ""
 read -r -p "Continue? [y/N] " reply
@@ -43,7 +46,24 @@ echo "==> Installing passwordless grant (you'll be asked for your password once)
 echo "==> Installing the watchdog agent"
 "$REPO/watchdog-agent.sh" install
 
-# 4. Migrate away from the pre-SMAppService login item. New installs never create it;
+# 4. The Claude Code hook. Asked, not assumed: this writes to a file that belongs to Claude
+# Code and to whatever else the user has configured there.
+echo ""
+echo "==> Claude Code hook (optional)"
+if "$REPO/sleepless" hook >/dev/null 2>&1; then
+  echo "    Already installed."
+else
+  echo "    Sleepless can end keep-awake when Claude Code goes quiet. That works without a"
+  echo "    hook (it watches transcript activity), but a PreToolUse hook is precise."
+  echo "    This merges one line into ~/.claude/settings.json and backs the file up first."
+  read -r -p "    Add it now? [y/N] " hook_reply
+  case "$hook_reply" in
+    [yY]*) "$REPO/sleepless" hook --install || echo "    (skipped: see the error above)" ;;
+    *)     echo "    Skipped. Add it later with: ./sleepless hook --install" ;;
+  esac
+fi
+
+# 5. Migrate away from the pre-SMAppService login item. New installs never create it;
 # users who wanted login launch can enable the native switch after the app opens.
 if [ -f "$LEGACY_LAUNCH_AGENT" ]; then
   echo "==> Removing obsolete script-installed login item"
@@ -58,9 +78,5 @@ echo ""
 echo "✅ Installed. The coffee cup is in your menu bar — click it to toggle."
 echo "   Turn ON, close the lid: your Mac stays awake on battery (auto-off at the floor you set)."
 echo "   A watchdog agent clears the flag if the app dies while it is ON."
-echo ""
-# Non-fatal: the hook is optional, and only matters once you use the idle timeout.
-"$REPO/sleepless" hook || true
-echo ""
 echo "   Check it any time:  ./watchdog-agent.sh status"
 echo "   To remove everything (including the grant): ./uninstall.sh"
