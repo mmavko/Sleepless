@@ -44,6 +44,15 @@ jobs:
           TARGET="arm64-apple-macos13.0" ./build.sh "$PWD/dist"
           ls -la "dist/Sleepless.app/Contents" "dist/Sleepless.app/Contents/MacOS"
 
+      - name: Shell syntax check
+        run: |
+          set -euo pipefail
+          for f in *.sh tests/*.sh; do bash -n "$f"; done
+          echo "all shell scripts parse"
+
+      - name: Watchdog self-test
+        run: ./tests/watchdog-selftest.sh
+
       - name: Upload app artifact
         uses: actions/upload-artifact@v4
         with:

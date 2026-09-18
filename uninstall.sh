@@ -8,30 +8,43 @@ APP="/Applications/$APP_NAME.app"
 BUNDLE_ID="com.aboudjem.Sleepless"
 SUDOERS_DST="/etc/sudoers.d/sleepless-disablesleep"
 LAUNCH_AGENT="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
+SUPPORT_DIR="$HOME/Library/Application Support/Sleepless"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Sleepless uninstaller"
 echo "====================="
 
-# 1. Restore normal sleep BEFORE removing the grant (a reboot would also reset it to 0).
+# 1. Remove the watchdog FIRST, so it cannot tick during teardown and log failures about a
+# grant we are about to delete on purpose.
+echo "==> Removing the watchdog agent"
+if [ -x "$REPO/watchdog-agent.sh" ]; then
+  "$REPO/watchdog-agent.sh" uninstall || true
+else
+  launchctl bootout "gui/$(id -u)/$BUNDLE_ID.watchdog" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/$BUNDLE_ID.watchdog.plist"
+fi
+rm -rf "$SUPPORT_DIR"
+
+# 2. Restore normal sleep BEFORE removing the grant (a reboot would also reset it to 0).
 echo "==> Restoring normal sleep (disablesleep 0)"
 sudo -n /usr/bin/pmset -a disablesleep 0 2>/dev/null || sudo /usr/bin/pmset -a disablesleep 0 || true
 
-# 2. Quit the app + remove the login item.
+# 3. Quit the app + remove the login item.
 echo "==> Quitting app + removing login item"
 osascript -e "quit app \"$APP_NAME\"" 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/$BUNDLE_ID" 2>/dev/null || true
 rm -f "$LAUNCH_AGENT"
 
-# 3. Remove the app.
+# 4. Remove the app.
 echo "==> Removing $APP"
 rm -rf "$APP"
 
-# 4. Remove the passwordless grant (password required, by design — you're touching sudo).
+# 5. Remove the passwordless grant (password required, by design — you're touching sudo).
 echo "==> Removing passwordless grant (you may be asked for your password)"
 sudo rm -f "$SUDOERS_DST"
 sudo visudo -c >/dev/null && echo "    sudoers still parses cleanly"
 
-# 5. Proof of revocation: the previously-passwordless command must now PROMPT.
+# 6. Proof of revocation: the previously-passwordless command must now PROMPT.
 echo "==> Verifying the grant is gone"
 sudo -k
 if sudo -n /usr/bin/pmset -a disablesleep 0 2>/dev/null; then

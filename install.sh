@@ -20,7 +20,11 @@ echo "  1. Build $APP_NAME.app and copy it to /Applications."
 echo "  2. Install a passwordless sudo grant at $SUDOERS_DST so the app can flip"
 echo "     lid-close sleep without prompting. The exact template-derived grant is:"
 "$REPO/grant.sh" --print
-echo "  3. Remove the obsolete script-installed login item, if present."
+echo "  3. Install the watchdog LaunchAgent (~/Library/LaunchAgents), which clears"
+echo "     disablesleep if the app dies while it is set. It runs as you and uses the"
+echo "     grant above — no extra privilege. Without it, a crash while ON leaves your"
+echo "     Mac awake until you reboot."
+echo "  4. Remove the obsolete script-installed login item, if present."
 echo "     Use Sleepless's Launch at login switch to control the native login item."
 echo ""
 read -r -p "Continue? [y/N] " reply
@@ -34,7 +38,12 @@ DEST=/Applications "$REPO/build.sh" /Applications
 echo "==> Installing passwordless grant (you'll be asked for your password once)"
 "$REPO/grant.sh" --yes
 
-# 3. Migrate away from the pre-SMAppService login item. New installs never create it;
+# 3. The dead-man switch. Installed AFTER the grant, because that is the capability it
+# uses to clear the flag. See docs/LEASE-DESIGN.md.
+echo "==> Installing the watchdog agent"
+"$REPO/watchdog-agent.sh" install
+
+# 4. Migrate away from the pre-SMAppService login item. New installs never create it;
 # users who wanted login launch can enable the native switch after the app opens.
 if [ -f "$LEGACY_LAUNCH_AGENT" ]; then
   echo "==> Removing obsolete script-installed login item"
@@ -48,4 +57,6 @@ open "$APP"
 echo ""
 echo "✅ Installed. The coffee cup is in your menu bar — click it to toggle."
 echo "   Turn ON, close the lid: your Mac stays awake on battery (auto-off at the floor you set)."
+echo "   A watchdog agent clears the flag if the app dies while it is ON."
+echo "   Check it any time:  ./watchdog-agent.sh status"
 echo "   To remove everything (including the grant): ./uninstall.sh"
