@@ -495,6 +495,29 @@ sys.exit(0 if t.index('Add it now?') < t.index('open \"\$APP\"') else 1)
 grep -q 'hook --remove' "$REPO/uninstall.sh" && ok "uninstall   -> removes the hook" \
   || bad "uninstall leaves a hook pointing at a deleted script"
 
+# --- the 1 Hz ticker's lifetime --------------------------------------------------------
+# The ticker used to belong to the auto-off timer and now drives the whole status block. Two
+# regressions came from that coupling surviving the move: cancelling the auto-off timer froze
+# the unrelated Claude Code countdown, and opening the popover while off then switching on
+# never started it at all. Neither is reachable from a shell test, so guard the shape.
+echo
+echo "countdown ticker lifetime"
+
+if /usr/bin/python3 -c "
+import re, sys
+src = open('$REPO/App.swift').read()
+body = re.search(r'func cancelKeepAwakeTimer\(\) \{(.*?)\n    \}', src, re.S).group(1)
+sys.exit(1 if 'countdownTicker' in body.replace('// ', '#') .split('#')[0] else 0)
+" 2>/dev/null; then
+  ok "cancelKeepAwakeTimer leaves the ticker alone"
+else
+  bad "cancelKeepAwakeTimer stops the ticker again — freezes the Claude Code countdown"
+fi
+
+grep -q "if popover.isShown, on {" "$REPO/App.swift" \
+  && ok "applyUI starts the ticker when armed with the popover open" \
+  || bad "ticker only starts on popover open — switching on mid-popover would freeze it"
+
 # --- boot time: the shell/Swift contract --------------------------------------------
 # The lease is keyed on boot time, and the app writes it with sysctlbyname("kern.boottime")
 # while the scripts parse sysctl(8) output. If those disagree by even one, every lease the

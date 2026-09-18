@@ -681,8 +681,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func cancelKeepAwakeTimer() {
         keepAwakeTimer?.invalidate(); keepAwakeTimer = nil
-        countdownTicker?.invalidate(); countdownTicker = nil
         timerEndDate = nil
+        // Deliberately does NOT stop countdownTicker: the 1 Hz refresh belongs to the status
+        // block now, not to this timer, and the Claude Code countdown still needs it.
     }
 
     @objc private func keepAwakeTimerFired() {
@@ -849,6 +850,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         headerMark?.contentTintColor = on ? brandAccentSoft : .labelColor
         renderText()
         refreshLiveText()
+        // The ticker's lifetime is "popover visible AND keeping awake" — not the auto-off
+        // timer's, which is what it used to be chained to.
+        if popover.isShown, on {
+            if countdownTicker == nil { startCountdownTicker() }
+        } else if !on {
+            countdownTicker?.invalidate(); countdownTicker = nil
+        }
     }
 
     // Update text labels only (no pmset subprocess; safe to call on every slider tick).
