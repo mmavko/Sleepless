@@ -1,10 +1,7 @@
 # Design note: the lease and the dead-man switch
 
-**Status:** step 1 built (`watchdog.sh`, `lease.sh`, `watchdog-agent.sh`, `tests/watchdog-selftest.sh`). Steps 2–5 not started.
-
-> **Do not load the agent yet.** With the watchdog running and nothing renewing the
-> lease, it will correctly clear the flag within one tick — undoing the app's switch.
-> It becomes useful the moment step 2 lands.
+**Status:** steps 1–2 built. The app now holds and renews a lease, so the watchdog is live
+and `./install.sh` is safe to run. Steps 3–5 (CLI, Claude Code hooks, thermal) not started.
 
 ## The problem
 
@@ -152,17 +149,34 @@ Which is why it's step 5, not step 1.
 ## Order of work
 
 1. ~~Lease file format + the watchdog agent + `install.sh` / `uninstall.sh` integration.~~ **Done.**
-2. GUI writes and renews the lease; refuses to arm without a loaded watchdog. **Next.**
-3. CLI.
+2. ~~GUI writes and renews the lease; refuses to arm without a loaded watchdog.~~ **Done.**
+3. CLI. **Next.**
 4. Claude Code hook wiring (`Stop` → `sleepless off`).
 5. Thermal, as a lease-shortener.
 
 Steps 1–2 are the whole safety argument. Everything after is convenience.
 
+## Resolved while building
+
+**Hard-refuse or warn when the watchdog is missing?** Neither, quite: the app presents it as
+a choice, with **Cancel as the default button** and an explicit "Keep Awake Anyway" that lasts
+for that app session only. Refusing outright is brittle; arming silently would recreate the
+exact failure this fork exists to fix — believing you have a safety net you don't. The popover
+caption also says so whenever the watchdog isn't loaded.
+
+**Does the lease survive a GUI restart?** No. A clean quit releases the lease *and* restores
+normal sleep directly, rather than leaving the Mac awake for up to one watchdog tick. The
+watchdog stays the backstop for the case a clean quit cannot cover: a crash.
+
+**Shell and Swift must agree on boot time, and that is now a test, not an assumption.** Both
+scripts originally parsed `sysctl -n kern.boottime` with a greedy `.*sec = `, which matches
+`usec = ` — so both read the *microseconds* field. They agreed with each other, so every test
+passed, right up until `App.swift`'s `sysctlbyname` disagreed. That would have made the
+watchdog reject every lease the app writes and clear the flag ~30s after arming. The shared
+primitives now live in `leaselib.sh` so there is one copy to get wrong, and
+`tests/watchdog-selftest.sh` asserts the shell and Swift values match.
+
 ## Open questions
 
 - Agent vs daemon — agent recommended above, but it's a real trade and yours to make.
 - TTL numbers: is ~2.5 min of unattended awake after a crash acceptable, or should it be tighter?
-- Should the GUI **hard-refuse** to arm without a watchdog, or arm with a loud warning?
-- Does the lease survive a GUI restart (crash → relaunch inside the TTL keeps the Mac awake
-  seamlessly), or should a fresh launch always start from released?

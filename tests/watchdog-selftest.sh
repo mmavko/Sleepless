@@ -158,5 +158,53 @@ lease extend 300
 sed -i '' 's/^boot=.*/boot=1/' "$FAKE_HOME/Library/Application Support/Sleepless/lease"
 [ "$(tick_real_lease)" = "clear" ] && ok "lease from another boot -> clear" || bad "cross-boot lease -> should clear"
 
+# --- boot time: the shell/Swift contract --------------------------------------------
+# The lease is keyed on boot time, and the app writes it with sysctlbyname("kern.boottime")
+# while the scripts parse sysctl(8) output. If those disagree by even one, every lease the
+# app writes is rejected and the watchdog clears the flag ~30s after you arm it.
+#
+# This actually happened: `.*sec = ` is greedy and matched "usec = ", so both scripts read
+# the MICROSECONDS field. They agreed with each other, so nothing failed until Swift
+# joined. Hence two assertions, not one.
+echo
+echo "boot time"
+
+# Call the REAL function from leaselib.sh. An earlier version of this test inlined a copy
+# of the regex, which meant it validated the copy and would never have caught a regression
+# in the shipped code.
+SHELL_BOOT="$(HOME="$FAKE_HOME" bash -c '. "$1/leaselib.sh"; boot_time' _ "$REPO")"
+NOW="$(date +%s)"
+
+# A boot time must be a plausible unix epoch in the past. The old bug produced ~480767,
+# which is 1970 — this assertion alone would have caught it.
+if [ -n "$SHELL_BOOT" ] && [ "$SHELL_BOOT" -gt 1000000000 ] && [ "$SHELL_BOOT" -le "$NOW" ]; then
+  ok "shell boot time is a plausible epoch ($SHELL_BOOT)"
+else
+  bad "shell boot time implausible: '${SHELL_BOOT:-empty}' (now=$NOW)"
+fi
+
+# And it must equal what the app computes, which is the contract that actually matters.
+if command -v swiftc >/dev/null 2>&1; then
+  cat > "$TMP/boot.swift" <<'SWIFTEOF'
+import Foundation
+var tv = timeval()
+var size = MemoryLayout<timeval>.stride
+guard sysctlbyname("kern.boottime", &tv, &size, nil, 0) == 0 else { exit(1) }
+print(Int(tv.tv_sec))
+SWIFTEOF
+  if swiftc -O "$TMP/boot.swift" -o "$TMP/boottest" 2>/dev/null; then
+    SWIFT_BOOT="$("$TMP/boottest")"
+    if [ "$SWIFT_BOOT" = "$SHELL_BOOT" ]; then
+      ok "shell and Swift boot time agree"
+    else
+      bad "shell ($SHELL_BOOT) and Swift ($SWIFT_BOOT) boot time DISAGREE"
+    fi
+  else
+    echo "  skip  Swift boot-time comparison (swiftc present but compile failed)"
+  fi
+else
+  echo "  skip  Swift boot-time comparison (no swiftc)"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -19,24 +19,16 @@
 # is the reason it's an Agent rather than a root Daemon. See docs/LEASE-DESIGN.md.
 set -euo pipefail
 
-SUPPORT_DIR="$HOME/Library/Application Support/Sleepless"
-LEASE_FILE="$SUPPORT_DIR/lease"
-LEASE_VERSION=1
-# A lease further out than this is treated as corrupt rather than honoured. Bounds the
-# damage from a bad clock or a garbled write: the worst case is an early turn-off.
-MAX_LEASE_HORIZON=$((12 * 60 * 60))
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The lease format lives in exactly one place. watchdog-agent.sh installs this file
+# alongside the script, so the installed copy is self-contained.
+# shellcheck source=leaselib.sh
+. "$SCRIPT_DIR/leaselib.sh"
 
 PMSET=/usr/bin/pmset
 SUDO=/usr/bin/sudo
 
 log() { printf '[sleepless-watchdog] %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
-
-# Seconds since the epoch at which the running kernel booted. A lease written before the
-# current boot is meaningless: disablesleep resets to 0 on reboot, so anything still
-# claiming a lease across that boundary is stale state, not intent.
-boot_time() {
-  /usr/sbin/sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9][0-9]*\).*/\1/p'
-}
 
 # 1 when the kernel flag is set, 0 otherwise. Needs no privilege. The line is absent
 # entirely when the flag has never been set this boot, which reads as 0. Matches the last
@@ -67,43 +59,15 @@ if [ "${SLEEPLESS_SELFTEST:-}" = "1" ]; then
   fi
 fi
 
-# Read one digits-only field from the lease. The lease file is NEVER sourced and never
-# eval'd: every field is matched as an explicit run of digits, so a corrupt or hostile file
-# yields an empty string rather than executing anything.
-lease_field() {
-  sed -n "s/^$1=\([0-9][0-9]*\)\$/\1/p" "$LEASE_FILE" 2>/dev/null | head -1
-}
-
-# Decide. Echoes a reason to clear, or nothing to leave the flag alone.
+# Decide, using the shared lease_state(). Echoes a reason to clear, or nothing to leave
+# the flag alone.
 reason_to_clear() {
-  local now boot version expires
-  now="$(date +%s)"
-  boot="$(boot_time)"
-
-  [ -f "$LEASE_FILE" ] || { echo "no lease file"; return; }
-
-  version="$(lease_field version)"
-  [ "$version" = "$LEASE_VERSION" ] || { echo "unreadable lease (version='${version:-none}')"; return; }
-
-  expires="$(lease_field expires)"
-  [ -n "$expires" ] || { echo "lease has no expiry"; return; }
-
-  local lease_boot
-  lease_boot="$(lease_field boot)"
-  if [ -n "$boot" ] && [ -n "$lease_boot" ] && [ "$lease_boot" != "$boot" ]; then
-    echo "lease predates this boot"
-    return
-  fi
-
-  if [ "$expires" -le "$now" ]; then
-    echo "lease expired $((now - expires))s ago"
-    return
-  fi
-
-  if [ "$expires" -gt "$((now + MAX_LEASE_HORIZON))" ]; then
-    echo "lease expiry implausibly far out ($((expires - now))s); treating as corrupt"
-    return
-  fi
+  local state; state="$(lease_state)"
+  case "$state" in
+    live\ *) ;;                      # a live lease is the only thing that holds the flag
+    dead\ *) echo "${state#dead }" ;;
+    *)       echo "unrecognised lease state" ;;
+  esac
 }
 
 main() {

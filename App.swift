@@ -42,6 +42,16 @@ import notify
 
 // MARK: - Tunables
 private let pollInterval: TimeInterval = 60
+// Keep-awake lease (the dead-man switch). The app does NOT own disablesleep; it holds a
+// lease that expires. watchdog.sh clears the flag whenever no live lease says it should be
+// set, so a crash here means the Mac goes back to sleeping on its own within one tick
+// instead of staying awake until reboot. Format and rationale: docs/LEASE-DESIGN.md.
+private let leaseVersion = 1
+private let leaseTTL = 120                      // seconds a single renewal is good for
+private let leaseRenewInterval: TimeInterval = 30   // must stay well under leaseTTL
+private let watchdogLabel = "com.aboudjem.Sleepless.watchdog"
+private let leaseRelativePath = "Library/Application Support/Sleepless/lease"
+
 // Battery-floor config (user-adjustable via the popover slider; persisted in UserDefaults).
 private let floorKey = "batteryFloorPercent"
 private let floorDefault = 15
@@ -184,6 +194,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Auto-off timer (in-memory; dies on quit, never survives a reboot)
     private var autoOffMinutes = 0           // 0 = none (stay on until off), 60, or 120
+    private var leaseTimer: Timer?              // renews the lease while we intend to stay awake
+    private var watchdogIsLoaded = false        // cached; launchctl is not free enough for renderText
+    private var armedWithoutWatchdog = false    // user's explicit per-session override
     private var clamshellToken: Int32 = NOTIFY_TOKEN_INVALID
     private var lidClosed = false
     private var keepAwakeTimer: Timer?       // one-shot: flips sleep back on when it fires
@@ -415,15 +428,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // unobservable, state-proxy decision is what made earlier releases re-prompt spuriously.
     @discardableResult
     private func performToggle(wantOn: Bool) -> Bool {
+        if wantOn {
+            // The safety net is the point of this build, so arming without it is an explicit,
+            // per-session choice rather than a silent downgrade.
+            refreshWatchdogState()
+            if !watchdogIsLoaded, !armedWithoutWatchdog {
+                guard confirmArmingWithoutWatchdog() else { refresh(); return true }
+                armedWithoutWatchdog = true
+            }
+            // Lease FIRST, flag second: never leave a window where disablesleep is set with no
+            // lease behind it, which the watchdog would (correctly) undo on its next tick.
+            extendLease()
+        }
         let result = setDisableSleep(wantOn)
         switch result {
         case .ok:
             break
         case .grantMissing:
+            if wantOn { releaseLease() }
             showGrantInstructions()
             refresh()
             return true
         case .failed(let detail):
+            if wantOn { releaseLease() }
             // Surface BOTH directions. A failed turn-off is the dangerous one: the Mac stays awake.
             NSLog("Sleepless: pmset toggle failed: %@", detail)
             notify(wantOn
@@ -432,6 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refresh()
             return true
         }
+        if wantOn { startLeaseRenewal() } else { stopLeaseRenewal() }
         // A deliberate, successful turn-on wins over the Low Power Mode auto-off (hard floor still wins).
         userForcedOn = wantOn
         refresh()                              // applies UI + safety nets; switch reflects reality
@@ -542,6 +570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @discardableResult
     private func turnOffForSafety(_ reason: String, success: String) -> Bool {
         let result = setDisableSleep(false)
+        if result == .ok { stopLeaseRenewal() }
         applyUI(on: readSleepDisabled())
         if result == .ok {
             notify(success)
@@ -586,6 +615,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Core state sync
     @objc private func refresh() {
         ensureStatusItemVisible()
+        refreshWatchdogState()
         let on = readSleepDisabled()
         applyUI(on: on)
         if on { enforceSafetyNets() }
@@ -593,7 +623,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyUI(on: Bool) {
         isOn = on
-        if !on { cancelKeepAwakeTimer() }   // going OFF clears any countdown/timer
+        if !on {
+            cancelKeepAwakeTimer()      // going OFF clears any countdown/timer
+            stopLeaseRenewal()          // ...and drops the lease, however we got here —
+        }                               // including the watchdog clearing the flag under us
         // ARMED = kept awake while actively discharging on battery, so the
         // auto-off safety net is live. Distinct menu-bar glyph (cup + dot).
         var armed = false
@@ -624,9 +657,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Update text labels only (no pmset subprocess; safe to call on every slider tick).
     private func renderText() {
         floorValueLabel?.stringValue = "\(batteryFloorPercent)%"
-        captionLabel?.stringValue = isOn
-            ? "Stays awake when the lid is closed. Turns off at \(batteryFloorPercent)% battery or in Low Power Mode."
-            : "Sleeps normally when you close the lid."
+        if !watchdogIsLoaded {
+            captionLabel?.stringValue = isOn
+                ? "⚠️ No watchdog: if Sleepless quits, your Mac stays awake until you reboot."
+                : "⚠️ Watchdog not running. Install it: ./watchdog-agent.sh install"
+        } else {
+            captionLabel?.stringValue = isOn
+                ? "Stays awake when the lid is closed. Turns off at \(batteryFloorPercent)% battery or in Low Power Mode."
+                : "Sleeps normally when you close the lid."
+        }
     }
 
     @objc private func floorSliderChanged(_ sender: NSSlider) {
@@ -689,6 +728,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return (process.terminationStatus,
                 String(data: outData, encoding: .utf8) ?? "",
                 String(data: errData, encoding: .utf8) ?? "")
+    }
+
+    // MARK: - Keep-awake lease — the dead-man switch (Feature 5)
+    //
+    // Mirrors lease.sh exactly; that script is the reference writer and the two must agree
+    // byte for byte on the format, or the watchdog silently stops trusting our leases.
+    private var leaseURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(leaseRelativePath)
+    }
+
+    // Seconds since the epoch at which the running kernel booted. A lease cannot outlive its
+    // boot: disablesleep resets to 0 on reboot, so a lease from before it is stale by
+    // construction. Read through sysctl rather than a subprocess — this runs every 30s.
+    private func bootTimeSeconds() -> Int? {
+        var tv = timeval()
+        var size = MemoryLayout<timeval>.stride
+        guard sysctlbyname("kern.boottime", &tv, &size, nil, 0) == 0 else { return nil }
+        return Int(tv.tv_sec)
+    }
+
+    // Current expiry, but only from a lease this boot can trust. Digits-only fields, same as
+    // the shell reader: anything unparseable reads as "no live lease", which lets the flag go.
+    private func liveLeaseExpiry() -> Int? {
+        guard let text = try? String(contentsOf: leaseURL, encoding: .utf8) else { return nil }
+        var fields: [String: Int] = [:]
+        for line in text.split(separator: "\n") {
+            let parts = line.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2, !parts[1].isEmpty,
+                  parts[1].allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let value = Int(parts[1]) else { continue }
+            fields[String(parts[0])] = value
+        }
+        guard fields["version"] == leaseVersion,
+              let boot = bootTimeSeconds(), fields["boot"] == boot,
+              let expires = fields["expires"] else { return nil }
+        return expires
+    }
+
+    // Extend is a FLOOR, never an assignment: our 30s renewal must not truncate a longer
+    // lease someone else (the CLI, later) is holding.
+    @discardableResult
+    private func extendLease() -> Bool {
+        guard let boot = bootTimeSeconds() else {
+            NSLog("Sleepless: no boot time; refusing to write a lease")
+            return false
+        }
+        let now = Int(Date().timeIntervalSince1970)
+        var target = now + leaseTTL
+        if let current = liveLeaseExpiry(), current > target { target = current }
+        do {
+            try FileManager.default.createDirectory(at: leaseURL.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            // atomically: true is write-then-rename, so the watchdog never sees a partial lease.
+            try "version=\(leaseVersion)\nexpires=\(target)\nboot=\(boot)\n"
+                .write(to: leaseURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                  ofItemAtPath: leaseURL.path)
+            return true
+        } catch {
+            NSLog("Sleepless: couldn't write lease: %@", error.localizedDescription)
+            return false
+        }
+    }
+
+    private func releaseLease() { try? FileManager.default.removeItem(at: leaseURL) }
+
+    private func startLeaseRenewal() {
+        leaseTimer?.invalidate()
+        leaseTimer = Timer.scheduledTimer(timeInterval: leaseRenewInterval, target: self,
+                                          selector: #selector(renewLease), userInfo: nil, repeats: true)
+    }
+
+    // Stops renewing AND drops the lease: intent has ended, so the watchdog is free to act.
+    private func stopLeaseRenewal() {
+        leaseTimer?.invalidate(); leaseTimer = nil
+        releaseLease()
+    }
+
+    @objc private func renewLease() {
+        guard isOn else { stopLeaseRenewal(); return }
+        extendLease()
+    }
+
+    // Is the dead-man switch actually running? Cheap enough per poll, too expensive for
+    // renderText (which fires on every slider tick), hence the cached flag.
+    private func refreshWatchdogState() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = ["list", watchdogLabel]
+        proc.standardOutput = Pipe(); proc.standardError = Pipe()
+        do { try proc.run(); proc.waitUntilExit() } catch { watchdogIsLoaded = false; return }
+        watchdogIsLoaded = proc.terminationStatus == 0
+    }
+
+    // Arming without the watchdog is a real choice with a real cost, so it is presented as
+    // one. Refusing outright would be brittle; arming silently would recreate exactly the
+    // failure this fork exists to fix — the user believing they have a safety net they
+    // don't. Cancel is the default button; the override lasts for this app session only.
+    private func confirmArmingWithoutWatchdog() -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "The safety net isn't running"
+        alert.informativeText = """
+            Sleepless keeps your Mac awake by setting a system-wide flag that no app owns. A \
+            watchdog normally clears it if Sleepless quits or crashes — without it, the flag \
+            stays set until you reboot.
+
+            Install it from the source folder:
+
+                ./watchdog-agent.sh install
+            """
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Keep Awake Anyway")
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     // MARK: - Lid-close display power-off — Feature 4
@@ -808,6 +962,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    // A deliberate quit ends the intent, so it ends the state: drop the lease and restore
+    // normal sleep directly rather than leaving the Mac awake for up to one watchdog tick.
+    // The watchdog remains the backstop for the case this cannot cover — a crash.
+    func applicationWillTerminate(_ notification: Notification) {
+        releaseLease()
+        leaseTimer?.invalidate(); leaseTimer = nil
+        if readSleepDisabled() { setDisableSleep(false) }
+    }
 }
 
 @main

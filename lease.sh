@@ -15,31 +15,11 @@
 # watchdog not to take it away yet.
 set -euo pipefail
 
-SUPPORT_DIR="$HOME/Library/Application Support/Sleepless"
-LEASE_FILE="$SUPPORT_DIR/lease"
-LEASE_VERSION=1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=leaselib.sh
+. "$SCRIPT_DIR/leaselib.sh"
+
 DEFAULT_TTL=120
-MAX_LEASE_HORIZON=$((12 * 60 * 60))
-
-boot_time() {
-  /usr/sbin/sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9][0-9]*\).*/\1/p'
-}
-
-lease_field() {
-  sed -n "s/^$1=\([0-9][0-9]*\)\$/\1/p" "$LEASE_FILE" 2>/dev/null | head -1
-}
-
-# Current expiry, but only if the lease is one this boot can trust. A lease from before the
-# current boot is stale by construction: disablesleep resets to 0 on reboot.
-live_expiry() {
-  local boot lease_boot version expires
-  [ -f "$LEASE_FILE" ] || return 0
-  version="$(lease_field version)"; [ "$version" = "$LEASE_VERSION" ] || return 0
-  boot="$(boot_time)"; lease_boot="$(lease_field boot)"
-  [ -n "$lease_boot" ] && [ "$lease_boot" = "$boot" ] || return 0
-  expires="$(lease_field expires)"; [ -n "$expires" ] || return 0
-  echo "$expires"
-}
 
 cmd_extend() {
   local ttl="${1:-$DEFAULT_TTL}" now target current

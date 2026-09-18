@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LABEL="com.aboudjem.Sleepless.watchdog"
 SUPPORT_DIR="$HOME/Library/Application Support/Sleepless"
 INSTALLED_WATCHDOG="$SUPPORT_DIR/watchdog.sh"
+INSTALLED_LIB="$SUPPORT_DIR/leaselib.sh"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/Sleepless-watchdog.log"
 # Must stay well under the lease TTL the renewers use, or a live lease can lapse unnoticed
@@ -33,12 +34,16 @@ cmd_status() {
 }
 
 cmd_install() {
-  [ -f "$SCRIPT_DIR/watchdog.sh" ] || { echo "error: watchdog.sh not found beside this script" >&2; exit 1; }
+  for f in watchdog.sh leaselib.sh; do
+    [ -f "$SCRIPT_DIR/$f" ] || { echo "error: $f not found beside this script" >&2; exit 1; }
+  done
 
   mkdir -p "$SUPPORT_DIR" "$(dirname "$PLIST")" "$(dirname "$LOG")"
   # Install a COPY rather than pointing launchd at the repo: the agent must keep working if
   # the working tree moves, and must not change under it when you switch branches.
   install -m 0755 "$SCRIPT_DIR/watchdog.sh" "$INSTALLED_WATCHDOG"
+  # watchdog.sh sources this from its own directory, so the installed pair is self-contained.
+  install -m 0644 "$SCRIPT_DIR/leaselib.sh" "$INSTALLED_LIB"
 
   cat > "$PLIST" <<PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -76,7 +81,7 @@ PLIST_EOF
 
 cmd_uninstall() {
   launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
-  rm -f "$PLIST" "$INSTALLED_WATCHDOG"
+  rm -f "$PLIST" "$INSTALLED_WATCHDOG" "$INSTALLED_LIB"
   if is_loaded; then
     echo "error: $LABEL is still loaded" >&2
     exit 1

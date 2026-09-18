@@ -20,11 +20,10 @@ Keeping that scope explicit is what stops the app growing into a power manager.
 ## Install
 
 ```bash
-./build.sh /Applications && ./grant.sh
+./install.sh
 ```
 
-(Use these two rather than `./install.sh` for now — `install.sh` also loads the watchdog
-agent, which isn't useful until step 2. See **Known gaps**.)
+Builds the app, installs the sudoers grant, and loads the watchdog agent.
 
 `build.sh` compiles `App.swift` with `swiftc` and hand-assembles an ad-hoc-signed bundle —
 no Xcode project, no downloaded blobs.
@@ -43,8 +42,9 @@ Run it yourself, once per machine. **The app never installs it** — see
 
 ## Safety nets
 
-`disablesleep` is global kernel state that no process owns. If nothing turns it off, nothing
-turns it off. So:
+`disablesleep` is global kernel state that no process owns, and every in-app net dies with the
+process. So the app doesn't latch the flag — it holds a **lease** it must keep renewing, and a
+`launchd` watchdog clears the flag when nobody does. See [docs/LEASE-DESIGN.md](docs/LEASE-DESIGN.md).
 
 | Net | Behaviour |
 |---|---|
@@ -52,21 +52,16 @@ turns it off. So:
 | Low Power Mode | Steps aside when LPM is on and discharging, unless you deliberately turned it on. |
 | Auto-off timer | 1h / 2h with a live countdown. Retries if the privileged call fails. |
 | Lid close | Puts the built-in display to sleep, so a closed laptop isn't lit, hot and unlocked. |
-| Reboot | macOS resets `disablesleep` to 0. This is the only net that survives the app dying. |
+| Crash / force-quit | A watchdog outside the app clears the flag within ~2.5 min. **The dead man's switch.** |
+| Reboot | macOS resets `disablesleep` to 0. |
 
 Every net now **fails closed**: if the privileged call fails, the app says so and stays armed
 rather than announcing a turn-off that never happened.
 
 ## Known gaps
 
-- **The dead-man switch is half-built.** The watchdog exists and is tested
-  (`watchdog.sh`, `lease.sh`, `./tests/watchdog-selftest.sh`), but nothing renews a lease yet,
-  so **don't load the agent**: it would correctly clear the flag within a tick and undo the
-  switch. Until then, quitting or crashing while ON leaves `disablesleep` at 1 until you
-  reboot or run `sudo pmset -a disablesleep 0`. Upstream issue
-  [#8](https://github.com/Aboudjem/Sleepless/issues/8); design and status in
-  [docs/LEASE-DESIGN.md](docs/LEASE-DESIGN.md).
-- **No CLI.** Planned, so a Claude Code `Stop` hook can release the lease.
+- **No CLI yet**, so nothing but the app renews the lease. Next up, so a Claude Code `Stop`
+  hook can release it.
 - **No thermal awareness.** Deliberately last; see the design note.
 - **Lid-close display sleep is untested on hardware.** Verify before trusting it in a bag.
 
