@@ -357,71 +357,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func switchToggled(_ sender: NSSwitch) {
         if performToggle(wantOn: sender.state == .on) {
-            sender.state = .off   // setup needed / failed: reflect reality (performToggle notified)
+            // The transition failed. Show the state the SYSTEM is actually in — forcing .off here
+            // made a failed turn-OFF read as "asleep" while the Mac was still being kept awake.
+            sender.state = isOn ? .on : .off
         }
     }
 
-    // Core keep-awake toggle, decoupled from the UI sender. Returns true ONLY when the user
-    // must act (the passwordless grant is missing and setup did not complete) so the caller can
-    // reflect OFF. The decision to prompt is made on the REAL sudo result (see setDisableSleep),
+    // Core keep-awake toggle, decoupled from the UI sender. Returns true when the requested
+    // transition FAILED, so the caller can resync the switch to reality. The decision is made on
+    // the REAL sudo result (see setDisableSleep),
     // never by re-reading SleepDisabled: a successful sudo means the command ran, even if a
     // safety net (Low Power Mode / battery floor) legitimately turns sleep back on afterwards —
     // which must NOT be mistaken for "permission missing" and trigger a password prompt. This
     // unobservable, state-proxy decision is what made earlier releases re-prompt spuriously.
     @discardableResult
     private func performToggle(wantOn: Bool) -> Bool {
-        var result = setDisableSleep(wantOn)
-        // Only a genuinely MISSING grant warrants the one-time native-auth setup. A successful
-        // sudo (.ok) — or any other failure — never re-prompts here.
-        if wantOn, result == .grantMissing {
-            if installGrantViaAuth() { result = setDisableSleep(true) }
-            if result != .ok {
-                notify("Couldn't keep awake. The permission isn't set up yet.")
-                return true
-            }
+        let result = setDisableSleep(wantOn)
+        switch result {
+        case .ok:
+            break
+        case .grantMissing:
+            showGrantInstructions()
+            refresh()
+            return true
+        case .failed(let detail):
+            // Surface BOTH directions. A failed turn-off is the dangerous one: the Mac stays awake.
+            NSLog("Sleepless: pmset toggle failed: %@", detail)
+            notify(wantOn
+                ? "Couldn't keep awake. See Console for the pmset error."
+                : "Couldn't restore normal sleep. See Console for the pmset error.")
+            refresh()
+            return true
         }
         // A deliberate, successful turn-on wins over the Low Power Mode auto-off (hard floor still wins).
-        userForcedOn = wantOn && result == .ok
+        userForcedOn = wantOn
         refresh()                              // applies UI + safety nets; switch reflects reality
         if isOn, autoOffMinutes > 0 { startKeepAwakeTimer(minutes: autoOffMinutes) }
         return false
     }
 
-    // Install the one-time scoped grant via a SINGLE native macOS authorization (the
-    // standard Touch ID / password sheet) — no Terminal. Runs the bundled, audited
-    // grant.sh as root through osascript's "with administrator privileges"; grant.sh is
-    // root-aware so it writes the sudoers drop-in directly with no inner sudo prompt.
-    // Returns true once the passwordless grant is in place; after that the app never asks again.
-    @discardableResult
-    private func installGrantViaAuth() -> Bool {
-        let intro = NSAlert()
-        intro.alertStyle = .informational
-        intro.messageText = "Enable keeping your Mac awake"
-        intro.informativeText = "Sleepless flips a protected macOS setting (pmset disablesleep), so it needs your permission once. macOS will ask you to authenticate (Touch ID or your password). After that the switch works instantly, with no more prompts."
-        intro.addButton(withTitle: "Enable")
-        intro.addButton(withTitle: "Not now")
-        NSApp.activate(ignoringOtherApps: true)
-        guard intro.runModal() == .alertFirstButtonReturn else { return false }
+    // Privilege setup is deliberately NOT launched from the GUI.
+    //
+    // Upstream installs the sudoers grant by running the bundled grant.sh as root through
+    // osascript's "with administrator privileges". A .app bundle is user-writable, so that is an
+    // avoidable substitution/TOCTOU surface: anything that can write into Contents/Resources
+    // between the check and the exec gets root. Upstream's version also built the AppleScript by
+    // string interpolation, escaping only backslash and double quote — a bundle path containing an
+    // apostrophe broke out of the single-quoted shell string.
+    //
+    // This is a personal build, so the fix is to delete the code path rather than harden it:
+    // installing the grant is a one-time, reviewed Terminal step. See docs/FORK.md.
+    private func showGrantInstructions() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "One-time permission needed"
+        alert.informativeText = """
+            Sleepless flips a protected macOS setting (pmset disablesleep), which needs a one-time \
+            passwordless sudo grant for exactly two commands.
 
-        guard let res = Bundle.main.resourcePath else { return false }
-        let grant = res + "/grant.sh"
-        // Pass the REAL user: under the native auth sheet grant.sh runs as root with
-        // SUDO_USER unset, so without this the grant would be written for "root" (useless).
-        let shellCmd = "SLEEPLESS_USER='\(NSUserName())' /bin/bash '\(grant)' --yes"
-        // escape for an AppleScript string literal, then run with one native auth sheet
-        let escaped = shellCmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        let osa = "do shell script \"\(escaped)\" with administrator privileges"
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        proc.arguments = ["-e", osa]
-        proc.standardOutput = Pipe(); proc.standardError = Pipe()
-        do { try proc.run(); proc.waitUntilExit() }
-        catch { notify("Couldn't start the one-time setup."); return false }
-        if proc.terminationStatus == 0 { return true }   // grant.sh installed the rule successfully
-        if proc.terminationStatus != 128 {               // 128 = user cancelled the auth sheet
-            notify("Setup didn't complete. Try again, or run grant.sh from the app bundle.")
-        }
-        return false
+            It is never installed from inside the app. Run this once, from the source folder you \
+            reviewed:
+
+                ./grant.sh
+
+            Then flip the switch again.
+            """
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     // A brief, subtle pulse on the menu-bar glyph whenever the state (and thus the cup
@@ -473,12 +476,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func keepAwakeTimerFired() {
-        setDisableSleep(false)
-        cancelKeepAwakeTimer()
-        autoOffMinutes = 0
-        autoOffControl?.selectedSegment = 0
+        if turnOffForSafety("Auto-off timer ended",
+                            success: "Auto-off timer ended. Sleepless turned off.") {
+            cancelKeepAwakeTimer()
+            autoOffMinutes = 0
+            autoOffControl?.selectedSegment = 0
+        } else {
+            // This timer is one-shot. Without an explicit retry a single transient sudo/pmset
+            // failure silently defeats the auto-off and the Mac stays awake indefinitely.
+            timerEndDate = Date().addingTimeInterval(pollInterval)
+            keepAwakeTimer = Timer.scheduledTimer(timeInterval: pollInterval, target: self,
+                                                  selector: #selector(keepAwakeTimerFired),
+                                                  userInfo: nil, repeats: false)
+            updateCountdownLabel()
+        }
+    }
+
+    // Every safety net turns Sleepless off through here. A failed privileged call must never be
+    // treated as success: the Mac is still awake, so say so and stay armed. Returns true only when
+    // normal sleep was really restored. The battery-floor and Low-Power-Mode nets re-evaluate on
+    // the next poll by themselves; one-shot callers must reschedule.
+    @discardableResult
+    private func turnOffForSafety(_ reason: String, success: String) -> Bool {
+        let result = setDisableSleep(false)
         applyUI(on: readSleepDisabled())
-        notify("Auto-off timer ended. Sleepless turned off.")
+        if result == .ok {
+            notify(success)
+            return true
+        }
+        NSLog("Sleepless: safety turn-off (%@) failed: %@", reason, String(describing: result))
+        notify("\(reason), but normal sleep could NOT be restored. Still trying.")
+        return false
     }
 
     private func startCountdownTicker() {
@@ -625,16 +653,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard onBattery, discharging else { return }
         // Hard battery floor ALWAYS wins, even over a deliberate turn-on: never drain to empty.
         if percent <= batteryFloorPercent {
-            setDisableSleep(false); userForcedOn = false
-            applyUI(on: readSleepDisabled())
-            notify("Battery low (\(percent)%). Sleepless turned off.")
+            userForcedOn = false
+            turnOffForSafety("Battery low (\(percent)%)",
+                             success: "Battery low (\(percent)%). Sleepless turned off.")
             return
         }
         // Low Power Mode auto-off, UNLESS the user deliberately chose to keep awake this session.
         if ProcessInfo.processInfo.isLowPowerModeEnabled && !userForcedOn {
-            setDisableSleep(false)
-            applyUI(on: readSleepDisabled())
-            notify("Low Power Mode on. Sleepless turned off.")
+            turnOffForSafety("Low Power Mode on",
+                             success: "Low Power Mode on. Sleepless turned off.")
         }
     }
 
