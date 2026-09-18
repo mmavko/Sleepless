@@ -1,7 +1,7 @@
 # Design note: the lease and the dead-man switch
 
-**Status:** steps 1–2 built. The app now holds and renews a lease, so the watchdog is live
-and `./install.sh` is safe to run. Steps 3–5 (CLI, Claude Code hooks, thermal) not started.
+**Status:** steps 1–4 built. The app now holds and renews a lease, so the watchdog is live
+and `./install.sh` is safe to run. Step 5 (thermal) not started.
 
 ## The problem
 
@@ -150,11 +150,50 @@ Which is why it's step 5, not step 1.
 
 1. ~~Lease file format + the watchdog agent + `install.sh` / `uninstall.sh` integration.~~ **Done.**
 2. ~~GUI writes and renews the lease; refuses to arm without a loaded watchdog.~~ **Done.**
-3. CLI. **Next.**
-4. Claude Code hook wiring (`Stop` → `sleepless off`).
-5. Thermal, as a lease-shortener.
+3. ~~CLI.~~ **Done** — `sleepless extend | status | off | release`.
+4. ~~Claude Code hook wiring.~~ **Done** — one `PreToolUse` hook, see below.
+5. Thermal, as a lease-shortener. **Next.**
 
 Steps 1–2 are the whole safety argument. Everything after is convenience.
+
+## The hook design, after it was wrong twice
+
+The first sketch was "`SessionStart` → on, `Stop` → off". Both halves are wrong:
+
+- **`Stop` fires at the end of every assistant turn**, not at session end, so it would release
+  after every response. `SessionEnd` is the session-level event.
+- **`SessionEnd` is unreliable anyway.** Sessions linger, terminals get closed, nothing fires.
+
+The second sketch fixed the parallel-session problem — first session out releases the shared
+lease and kills the others — with reference-counted per-session holders (`leases.d/<session_id>`).
+That was over-engineering, and the unreliability of `SessionEnd` is what shows why:
+
+**If release is never the mechanism, refcounting isn't needed.** When holders only ever
+*extend*, the `max()` floor semantics already in `leaselib.sh` compose correctly across any
+number of writers on one file: whoever is active keeps the lease alive, and it lapses after the
+last one goes quiet. No holder ids, no locking, no races. Expiry is the mechanism; release is a
+courtesy.
+
+So the whole integration is one hook and one verb:
+
+```json
+"PreToolUse": [{ "hooks": [{ "type": "command", "command": ".../sleepless extend" }] }]
+```
+
+Tool activity is the heartbeat; its absence is the signal to stop.
+
+**`extend` must never arm keep-awake**, only prolong it — otherwise any Claude session anywhere
+silently disables this Mac's sleep. The hook replaces the **timer**, not the **switch**.
+
+**The idle timeout does not replace the auto-off timer.** They bound different things: the timer
+is a wall-clock ceiling, the idle setting bounds inactivity. Without the ceiling, a session that
+keeps calling tools holds the Mac awake indefinitely — on battery the floor catches it, on AC
+nothing does. The idle setting is also opt-in (off by default), because until a hook is wired
+nothing would ever extend the lease and every session would look idle.
+
+**Cost, stated plainly:** the timeout must exceed the longest single tool call, since a long
+build fires no hook until it finishes. `PreToolUse` firing *before* the call covers that, at the
+price of up to one timeout of idle overhang after work stops — bounded by the floor and the timer.
 
 ## Resolved while building
 

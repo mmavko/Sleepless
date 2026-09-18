@@ -24,6 +24,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/leaselib.sh"
 
 BUNDLE_ID="com.aboudjem.Sleepless"
+# Test seam. `defaults` talks to cfprefsd and ignores HOME, so the self-test cannot sandbox
+# the preference domain with a fake home the way it does the lease file — it needs this.
+# Honoured only under SLEEPLESS_SELFTEST=1, so a stray variable can't redirect the real CLI.
+if [ "${SLEEPLESS_SELFTEST:-}" = "1" ] && [ -n "${SLEEPLESS_DEFAULTS_DOMAIN:-}" ]; then
+  BUNDLE_ID="$SLEEPLESS_DEFAULTS_DOMAIN"
+fi
 FALLBACK_IDLE_MINUTES=20
 PMSET=/usr/bin/pmset
 

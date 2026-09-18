@@ -51,6 +51,12 @@ private let leaseTTL = 120                      // seconds a single renewal is g
 private let leaseRenewInterval: TimeInterval = 30   // must stay well under leaseTTL
 private let watchdogLabel = "com.aboudjem.Sleepless.watchdog"
 private let leaseRelativePath = "Library/Application Support/Sleepless/lease"
+// "Stop after no tool calls" — the idle timeout. 0 = off, and off is the default: it only
+// means anything once the Claude Code hook is wired, and until then nothing would ever
+// extend the lease, so every session would look idle. The `sleepless` CLI reads this same
+// UserDefaults key, which keeps the UI the single source of truth for the duration.
+private let idleKey = "idleTimeoutMinutes"
+private let idleChoices = [0, 10, 20, 60]
 
 // Battery-floor config (user-adjustable via the popover slider; persisted in UserDefaults).
 private let floorKey = "batteryFloorPercent"
@@ -182,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainCard: CardView!         // group-1 card; gets the brand-violet wash when awake
     private var headerMark: NSImageView!    // header coffee mark; tints violet when awake
     private var captionLabel: NSTextField!
+    private var idleHintLabel: NSTextField!
     private var floorValueLabel: NSTextField!
     private var floorSlider: NSSlider!
     private var autoOffControl: NSSegmentedControl!
@@ -195,6 +202,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Auto-off timer (in-memory; dies on quit, never survives a reboot)
     private var autoOffMinutes = 0           // 0 = none (stay on until off), 60, or 120
     private var leaseTimer: Timer?              // renews the lease while we intend to stay awake
+    private var idleControl: NSSegmentedControl!
+    private var idleTimeoutMinutes = 0
+    private var armedAt: Date?                  // when the switch was last turned on
+    private var lastExternalExtend: Date?       // last time someone ELSE pushed the lease out
+    private var lastSelfWrittenExpiry = 0       // so we can tell our own renewal from a hook's
     private var watchdogIsLoaded = false        // cached; launchctl is not free enough for renderText
     private var armedWithoutWatchdog = false    // user's explicit per-session override
     private var clamshellToken: Int32 = NOTIFY_TOKEN_INVALID
@@ -204,11 +216,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timerEndDate: Date?
 
     private let popoverWidth: CGFloat = 320
-    private let popoverHeight: CGFloat = 432
+    private let popoverHeight: CGFloat = 500
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         batteryFloorPercent = min(max((UserDefaults.standard.object(forKey: floorKey) as? Int) ?? floorDefault, floorMin), floorMax)
+        idleTimeoutMinutes = (UserDefaults.standard.object(forKey: idleKey) as? Int) ?? 0
+        if !idleChoices.contains(idleTimeoutMinutes) { idleTimeoutMinutes = 0 }
         createStatusItem()
         popover.behavior = .applicationDefined   // app-managed dismissal (no transient close/reopen flicker)
         popover.animates = true
@@ -304,7 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         g1.addSubview(captionLabel)
 
         // GROUP 2 — auto-off timer (label + segmented [Off | 1h | 2h] + countdown)
-        let g2y = g1y + g1h + 12, g2h: CGFloat = 78
+        let g2y = g1y + g1h + 12, g2h: CGFloat = 146
         let g2 = makeCard(NSRect(x: pad, y: g2y, width: contentW, height: g2h))
         let timerLabel = makeLabel("Auto-off timer", font: .systemFont(ofSize: 13), color: .labelColor)
         timerLabel.frame = NSRect(x: ci, y: ci + 3, width: 110, height: 22)
@@ -323,6 +337,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         countdownLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
         countdownLabel.frame = NSRect(x: ci, y: ci + 36, width: cw, height: 16)
         g2.addSubview(countdownLabel)
+
+        // Same card because it answers the same question — when does this end? The timer is a
+        // wall-clock ceiling; this one bounds IDLENESS. Neither replaces the other: without the
+        // ceiling, a session that keeps calling tools holds the Mac awake indefinitely on AC.
+        let idleLabel = makeLabel("Stop after no tool calls", font: .systemFont(ofSize: 13), color: .labelColor)
+        idleLabel.frame = NSRect(x: ci, y: ci + 58, width: cw, height: 18)
+        g2.addSubview(idleLabel)
+        idleControl = NSSegmentedControl(labels: idleChoices.map { $0 == 0 ? "Off" : "\($0)m" },
+                                         trackingMode: .selectOne,
+                                         target: self, action: #selector(idleChanged(_:)))
+        idleControl.selectedSegment = idleChoices.firstIndex(of: idleTimeoutMinutes) ?? 0
+        idleControl.controlSize = .regular
+        idleControl.segmentStyle = .automatic
+        idleControl.frame = NSRect(x: ci, y: ci + 80, width: cw, height: 24)
+        g2.addSubview(idleControl)
+        idleHintLabel = makeLabel("", font: .systemFont(ofSize: 10), color: .tertiaryLabelColor)
+        idleHintLabel.frame = NSRect(x: ci, y: ci + 110, width: cw, height: 14)
+        g2.addSubview(idleHintLabel)
 
         // GROUP 3 — battery-floor (label + value + slider + min/max hints)
         let g3y = g2y + g2h + 12, g3h: CGFloat = 92
@@ -459,7 +491,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refresh()
             return true
         }
-        if wantOn { startLeaseRenewal() } else { stopLeaseRenewal() }
+        if wantOn {
+            armedAt = Date(); lastExternalExtend = nil; lastSelfWrittenExpiry = 0
+            startLeaseRenewal()
+        } else {
+            stopLeaseRenewal()
+        }
         // A deliberate, successful turn-on wins over the Low Power Mode auto-off (hard floor still wins).
         userForcedOn = wantOn
         refresh()                              // applies UI + safety nets; switch reflects reality
@@ -513,6 +550,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func poll() { refresh() }
+
+    @objc private func idleChanged(_ sender: NSSegmentedControl) {
+        let index = max(0, min(sender.selectedSegment, idleChoices.count - 1))
+        idleTimeoutMinutes = idleChoices[index]
+        UserDefaults.standard.set(idleTimeoutMinutes, forKey: idleKey)
+        // Changing the rule restarts its clock, so raising the limit can't retroactively
+        // make the current session already-idle and turn keep-awake off under you.
+        if isOn { armedAt = Date(); lastExternalExtend = nil }
+        renderText()
+    }
 
     // MARK: - Auto-off timer (Feature 1)
     @objc private func autoOffChanged(_ sender: NSSegmentedControl) {
@@ -657,6 +704,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Update text labels only (no pmset subprocess; safe to call on every slider tick).
     private func renderText() {
         floorValueLabel?.stringValue = "\(batteryFloorPercent)%"
+        // Doubles as the only way to tell whether the hook is actually wired up: if this keeps
+        // saying "no tool calls seen", the PreToolUse hook isn't reaching `sleepless extend`.
+        if idleTimeoutMinutes == 0 {
+            idleHintLabel?.stringValue = "Off. Needs the Claude Code PreToolUse hook — see README."
+        } else if let last = lastExternalExtend {
+            let minutes = Int(Date().timeIntervalSince(last) / 60)
+            idleHintLabel?.stringValue = minutes < 1
+                ? "Last tool call: just now."
+                : "Last tool call: \(minutes) min ago."
+        } else if isOn {
+            idleHintLabel?.stringValue = "No tool calls seen yet — is the hook installed?"
+        } else {
+            idleHintLabel?.stringValue = "Counts from the last `sleepless extend` by a hook."
+        }
         if !watchdogIsLoaded {
             captionLabel?.stringValue = isOn
                 ? "⚠️ No watchdog: if Sleepless quits, your Mac stays awake until you reboot."
@@ -775,8 +836,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
         let now = Int(Date().timeIntervalSince1970)
+        let current = liveLeaseExpiry()
+        // An expiry beyond anything WE wrote means a hook extended it: that is the activity
+        // signal the idle timeout is measured against.
+        if let current, current > lastSelfWrittenExpiry { lastExternalExtend = Date() }
         var target = now + leaseTTL
-        if let current = liveLeaseExpiry(), current > target { target = current }
+        if let current, current > target { target = current }
         do {
             try FileManager.default.createDirectory(at: leaseURL.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
@@ -785,6 +850,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .write(to: leaseURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o600],
                                                   ofItemAtPath: leaseURL.path)
+            lastSelfWrittenExpiry = target
             return true
         } catch {
             NSLog("Sleepless: couldn't write lease: %@", error.localizedDescription)
@@ -804,10 +870,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopLeaseRenewal() {
         leaseTimer?.invalidate(); leaseTimer = nil
         releaseLease()
+        armedAt = nil; lastExternalExtend = nil; lastSelfWrittenExpiry = 0
     }
 
     @objc private func renewLease() {
         guard isOn else { stopLeaseRenewal(); return }
+        // Idle timeout: measured from the last time SOMEONE ELSE pushed the lease out (a
+        // `sleepless extend` from a PreToolUse hook), falling back to when we armed. Our own
+        // 30s renewal deliberately does not count as activity, or this could never fire.
+        if idleTimeoutMinutes > 0, let since = lastExternalExtend ?? armedAt,
+           Date().timeIntervalSince(since) > Double(idleTimeoutMinutes * 60) {
+            turnOffForSafety("No tool calls for \(idleTimeoutMinutes) min",
+                             success: "No tool calls for \(idleTimeoutMinutes) min. Sleepless turned off.")
+            return
+        }
         extendLease()
     }
 

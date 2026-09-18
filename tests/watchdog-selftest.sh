@@ -173,6 +173,54 @@ lease extend 300
 sed -i '' 's/^boot=.*/boot=1/' "$FAKE_HOME/Library/Application Support/Sleepless/lease"
 [ "$(tick_real_lease)" = "clear" ] && ok "lease from another boot -> clear" || bad "cross-boot lease -> should clear"
 
+# --- the UI/CLI contract --------------------------------------------------------------
+# `sleepless extend` with no argument reads the app's idle-timeout setting, so the UI stays
+# the single source of truth. That is a cross-language contract like boot time, and the same
+# class of bug: if it silently falls back, every hook quietly uses the wrong duration.
+# A throwaway domain, because `defaults` goes through cfprefsd and ignores HOME.
+echo
+echo "UI/CLI contract (idle timeout)"
+
+TEST_DOMAIN="com.sleepless.selftest.$$"
+cleanup_domain() {
+  defaults delete "$TEST_DOMAIN" >/dev/null 2>&1 || true
+  rm -f "$HOME/Library/Preferences/$TEST_DOMAIN.plist"
+}
+trap 'cleanup_domain; rm -rf "$TMP"' EXIT
+
+ttl_for_setting() {
+  local minutes="$1"
+  if [ "$minutes" = "unset" ]; then
+    defaults delete "$TEST_DOMAIN" idleTimeoutMinutes >/dev/null 2>&1 || true
+  else
+    defaults write "$TEST_DOMAIN" idleTimeoutMinutes -int "$minutes" >/dev/null 2>&1
+  fi
+  HOME="$FAKE_HOME" bash "$LEASE_SH" release >/dev/null 2>&1
+  HOME="$FAKE_HOME" SLEEPLESS_SELFTEST=1 SLEEPLESS_DEFAULTS_DOMAIN="$TEST_DOMAIN" \
+    bash "$LEASE_SH" extend >/dev/null 2>&1
+  local exp; exp="$(HOME="$FAKE_HOME" bash -c '. "$1/leaselib.sh"; live_expiry' _ "$REPO")"
+  [ -n "$exp" ] && echo $(( exp - $(date +%s) )) || echo "none"
+}
+
+for pair in "10 600" "60 3600"; do
+  set -- $pair
+  got="$(ttl_for_setting "$1")"
+  # Allow a second of slack for the clock ticking between write and read.
+  if [ "$got" != "none" ] && [ "$got" -ge $(( $2 - 2 )) ] && [ "$got" -le "$2" ]; then
+    ok "setting ${1}m -> lease ttl ${got}s"
+  else
+    bad "setting ${1}m -> lease ttl '${got}s', expected ~$2"
+  fi
+done
+
+got="$(ttl_for_setting unset)"
+if [ "$got" != "none" ] && [ "$got" -ge 1198 ] && [ "$got" -le 1200 ]; then
+  ok "setting unset -> 20m fallback (${got}s)"
+else
+  bad "setting unset -> '${got}s', expected the ~1200s fallback"
+fi
+cleanup_domain
+
 # --- boot time: the shell/Swift contract --------------------------------------------
 # The lease is keyed on boot time, and the app writes it with sysctlbyname("kern.boottime")
 # while the scripts parse sysctl(8) output. If those disagree by even one, every lease the

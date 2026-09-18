@@ -50,7 +50,8 @@ process. So the app doesn't latch the flag — it holds a **lease** it must keep
 |---|---|
 | Battery floor | Turns off at 5–50% on battery (default 15%). Beats a deliberate turn-on. |
 | Low Power Mode | Steps aside when LPM is on and discharging, unless you deliberately turned it on. |
-| Auto-off timer | 1h / 2h with a live countdown. Retries if the privileged call fails. |
+| Auto-off timer | 1h / 2h wall-clock ceiling, live countdown. Retries if the privileged call fails. |
+| Idle timeout | Off by default. Stops N minutes after the last Claude Code tool call. |
 | Lid close | Puts the built-in display to sleep, so a closed laptop isn't lit, hot and unlocked. |
 | Crash / force-quit | A watchdog outside the app clears the flag within ~2.5 min. **The dead man's switch.** |
 | Reboot | macOS resets `disablesleep` to 0. |
@@ -60,10 +61,46 @@ rather than announcing a turn-off that never happened.
 
 ## Known gaps
 
-- **No CLI yet**, so nothing but the app renews the lease. Next up, so a Claude Code `Stop`
-  hook can release it.
+- **Thermal awareness isn't built.** Deliberately last — see the design note for why it
+  belongs in the watchdog as a lease-shortener rather than as its own mechanism.
 - **No thermal awareness.** Deliberately last; see the design note.
 - **Lid-close display sleep is untested on hardware.** Verify before trusting it in a bag.
+
+## Claude Code integration
+
+The point of the idle timeout: keep the Mac awake exactly as long as Claude is working, with
+no timer to guess at. One hook does it — in `~/.claude/settings.json` for every session on
+this machine, or `.claude/settings.json` for one project:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      { "hooks": [{ "type": "command", "command": "/Users/you/dev/sleepless/sleepless extend" }] }
+    ]
+  }
+}
+```
+
+Then set **Stop after no tool calls** in the popover. That's the whole integration.
+
+- **`extend` never arms keep-awake**, only prolongs it. You still flip the switch deliberately
+  when you're about to close the lid; the hook only decides *when it ends*. Otherwise any
+  Claude session anywhere would silently disable your Mac's sleep.
+- **Parallel sessions just work.** Everyone extends, nobody releases, and the lease uses
+  `max()` — so it lapses once the last session goes quiet, not the first. No session ids, no
+  refcounting, no locking.
+- **No `Stop` or `SessionEnd` hook.** `Stop` fires at the end of *every turn*, and `SessionEnd`
+  often never fires at all. Expiry is the mechanism; release is only a courtesy.
+- **Pick a timeout longer than your longest single tool call.** A 30-minute build fires no hook
+  until it finishes, and `PreToolUse` fires before it — so a 20m timeout covers it, at the cost
+  of up to 20 minutes of idle overhang. The battery floor and the auto-off timer still bound that.
+
+`sleepless status` shows all three things that matter:
+
+```bash
+./sleepless status
+```
 
 ## Verify it yourself
 
