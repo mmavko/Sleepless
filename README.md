@@ -86,8 +86,8 @@ rather than announcing a turn-off that never happened.
 
 - **Thermal protection is instrumented, not enforced.** The app records what each keep-awake
   session actually did and reports afterwards; it does not yet act on heat. See below.
-- **No thermal awareness.** Deliberately last; see the design note.
-- **Lid-close display sleep is untested on hardware.** Verify before trusting it in a bag.
+- **Lid-close display sleep is untested on hardware.** Verify before trusting it in a bag —
+  `sleepless report` will say "with the lid closed: 0" until you have.
 
 ## Is it set up? `sleepless status`
 

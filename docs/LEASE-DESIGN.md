@@ -1,7 +1,8 @@
 # Design note: the lease and the dead-man switch
 
-**Status:** steps 1–4 built. The app now holds and renews a lease, so the watchdog is live
-and `./install.sh` is safe to run. Step 5 (thermal) not started.
+**Status:** all five steps landed. The app holds and renews a lease, the watchdog is live, and
+`./install.sh` is safe to run. Step 5 is deliberately **instrumentation, not enforcement** — the
+app records what sessions do and reports afterwards rather than acting on guessed thresholds.
 
 ## The problem
 
@@ -199,7 +200,7 @@ Which is why it's step 5, not step 1.
 
 1. ~~Lease file format + the watchdog agent + `install.sh` / `uninstall.sh` integration.~~ **Done.**
 2. ~~GUI writes and renews the lease; refuses to arm without a loaded watchdog.~~ **Done.**
-3. ~~CLI.~~ **Done** — `sleepless extend | status | off | release`.
+3. ~~CLI.~~ **Done** — `sleepless extend | status | hook | report | off | release`.
 4. ~~Claude Code hook wiring.~~ **Done** — one `PreToolUse` hook, see below.
 5. Thermal — **instrumented, not enforced**. See below.
 

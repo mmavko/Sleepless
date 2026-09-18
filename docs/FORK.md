@@ -132,6 +132,19 @@ Upstream's README is preserved verbatim as [README.upstream.md](../README.upstre
 | g150446 | 15m / 30m timer choices + vertical segmented layout | fine, but upstream closed PR #6; revisit once the lease lands and the timer UI changes anyway |
 | theshaneyu | "Claude Remote Control" server (+568 lines) | a feature, not a fix |
 
+## 8. What this fork adds that upstream has not
+
+Sections 1–7 are changes to upstream's own code. Everything below was built afterwards and is
+new behaviour; the reasoning lives in [LEASE-DESIGN.md](LEASE-DESIGN.md).
+
+| | |
+|---|---|
+| **The dead-man switch** | `disablesleep` is no longer latched. The app holds a lease it must renew; a `launchd` watchdog clears the flag when nobody does, so a crash restores normal sleep in ~2.5 min instead of at the next reboot. Closes upstream issue [#8](https://github.com/Aboudjem/Sleepless/issues/8). |
+| **`sleepless` CLI** | `extend · status · hook · report · off · release`, sharing one lease format with the watchdog via `leaselib.sh`. |
+| **Claude Code integration** | A `PreToolUse` hook ends keep-awake when Claude Code goes quiet, with transcript mtimes as a zero-setup fallback. `install.sh` offers to add the hook; `uninstall.sh` removes it. |
+| **Session journal** | Every keep-awake session records thermal, battery, lid and power state; `sleepless report` reads the corpus back. Thermal is measured, not enforced — its thresholds would otherwise be guesses. |
+| **Popover rework** | One status block answering "what stops this, and when", live power-source updates, and Low Power Mode demoted to an opt-in setting (it was hardcoded on but gated behind an invisible flag that made it unreachable). |
+
 ## Open decisions
 
 - **Bundle ID** is still `com.aboudjem.Sleepless`. Fine while only one build is installed;
