@@ -58,6 +58,14 @@ private let leaseRelativePath = "Library/Application Support/Sleepless/lease"
 private let idleKey = "idleTimeoutMinutes"
 private let idleChoices = [0, 10, 20, 60]
 
+// Session journal — instrumentation, deliberately NOT a safety net (see docs/LEASE-DESIGN.md).
+// Thermal protection is the one net whose thresholds we would be GUESSING at, and a guessed
+// threshold is worse than none: it trips when it shouldn't and lends false confidence when it
+// doesn't. So this records what actually happens during keep-awake sessions and reports
+// afterwards, until there is enough real data to set thresholds from measurement.
+private let journalRelativePath = "Library/Application Support/Sleepless/sessions.jsonl"
+private let journalMaxBytes = 2 * 1024 * 1024
+
 // Battery-floor config (user-adjustable via the popover slider; persisted in UserDefaults).
 private let floorKey = "batteryFloorPercent"
 private let floorDefault = 15
@@ -207,6 +215,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var armedAt: Date?                  // when the switch was last turned on
     private var lastExternalExtend: Date?       // last time a hook pushed the lease out
     private var lastTranscriptActivity: Date?   // zero-setup fallback: newest Claude Code transcript
+    private var sessionStart: Date?             // journal: when the current keep-awake session armed
+    private var sessionSamples: [Sample] = []   // journal: in-memory samples for the current session
+    private var warnedCriticalThisSession = false
     private var lastSelfWrittenExpiry = 0       // so we can tell our own renewal from a hook's
     private var watchdogIsLoaded = false        // cached; launchctl is not free enough for renderText
     private var hookIsInstalled = false         // cached alongside it, for the same reason
@@ -233,6 +244,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         refresh()   // reflect TRUE system state on launch (never a stale assumption)
         startClamshellObserver()
+        NotificationCenter.default.addObserver(self, selector: #selector(thermalChanged),
+                                              name: ProcessInfo.thermalStateDidChangeNotification,
+                                              object: nil)
         timer = Timer.scheduledTimer(timeInterval: pollInterval, target: self,
                                      selector: #selector(poll), userInfo: nil, repeats: true)
     }
@@ -496,8 +510,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if wantOn {
             armedAt = Date(); lastExternalExtend = nil; lastSelfWrittenExpiry = 0
             startLeaseRenewal()
+            beginJournalSession()
         } else {
             stopLeaseRenewal()
+            endJournalSession(reason: "switch")
         }
         // A deliberate, successful turn-on wins over the Low Power Mode auto-off (hard floor still wins).
         userForcedOn = wantOn
@@ -551,7 +567,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }, completionHandler: nil)
     }
 
-    @objc private func poll() { refresh() }
+    @objc private func poll() {
+        refresh()
+        recordSample("sample")
+    }
+
+    @objc private func thermalChanged() { recordSample("thermal") }
 
     @objc private func idleChanged(_ sender: NSSegmentedControl) {
         let index = max(0, min(sender.selectedSegment, idleChoices.count - 1))
@@ -619,7 +640,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @discardableResult
     private func turnOffForSafety(_ reason: String, success: String) -> Bool {
         let result = setDisableSleep(false)
-        if result == .ok { stopLeaseRenewal() }
+        if result == .ok {
+            stopLeaseRenewal()
+            endJournalSession(reason: reason)
+        }
         applyUI(on: readSleepDisabled())
         if result == .ok {
             notify(success)
@@ -711,7 +735,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !on {
             cancelKeepAwakeTimer()      // going OFF clears any countdown/timer
             stopLeaseRenewal()          // ...and drops the lease, however we got here —
-        }                               // including the watchdog clearing the flag under us
+            endJournalSession(reason: "external")   // including the watchdog clearing it
+        }
         // ARMED = kept awake while actively discharging on battery, so the
         // auto-off safety net is live. Distinct menu-bar glyph (cup + dot).
         var armed = false
@@ -814,6 +839,160 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return (process.terminationStatus,
                 String(data: outData, encoding: .utf8) ?? "",
                 String(data: errData, encoding: .utf8) ?? "")
+    }
+
+    // MARK: - Session journal (instrumentation, not a safety net)
+    //
+    // One line per observation while keep-awake is ON, plus a summary when it ends. Thermal
+    // state ALONE would not be enough to build a real thermal net from later: "hot" means
+    // something completely different in a closed bag on battery than on a desk on AC, so every
+    // sample carries lid, power source, battery and Low Power Mode too.
+    struct Sample {
+        let at: Date
+        let thermal: ProcessInfo.ThermalState
+        let battery: Int
+        let onAC: Bool
+        let lidClosed: Bool
+        let lowPower: Bool
+    }
+
+    private var journalURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(journalRelativePath)
+    }
+
+    private func thermalName(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal:  return "nominal"
+        case .fair:     return "fair"
+        case .serious:  return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private func thermalRank(_ state: ProcessInfo.ThermalState) -> Int {
+        switch state {
+        case .nominal: return 0
+        case .fair: return 1
+        case .serious: return 2
+        case .critical: return 3
+        @unknown default: return 0
+        }
+    }
+
+    private func currentSample() -> Sample {
+        let (onBattery, _, percent) = batteryStatus()
+        return Sample(at: Date(),
+                      thermal: ProcessInfo.processInfo.thermalState,
+                      battery: percent,
+                      onAC: !onBattery,
+                      lidClosed: lidClosed,
+                      lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
+    }
+
+    private func appendJournal(_ fields: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
+              var line = String(data: data, encoding: .utf8) else { return }
+        line += "\n"
+        let url = journalURL
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: Data(line.utf8))
+            } else {
+                try Data(line.utf8).write(to: url)
+            }
+        } catch {
+            NSLog("Sleepless: couldn't append to the session journal: %@", error.localizedDescription)
+        }
+    }
+
+    // Keep the corpus from growing without bound. One generation back is plenty: this is for
+    // spotting patterns, not for audit.
+    private func rotateJournalIfNeeded() {
+        let url = journalURL
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+              size > journalMaxBytes else { return }
+        let rolled = url.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: rolled)
+        try? FileManager.default.moveItem(at: url, to: rolled)
+    }
+
+    private func sampleFields(_ sample: Sample) -> [String: Any] {
+        ["t": Int(sample.at.timeIntervalSince1970),
+         "thermal": thermalName(sample.thermal),
+         "battery": sample.battery,
+         "ac": sample.onAC,
+         "lid": sample.lidClosed ? "closed" : "open",
+         "lpm": sample.lowPower]
+    }
+
+    private func recordSample(_ event: String) {
+        guard sessionStart != nil else { return }
+        let sample = currentSample()
+        sessionSamples.append(sample)
+        var fields = sampleFields(sample)
+        fields["ev"] = event
+        appendJournal(fields)
+
+        // The one thing worth saying in the moment rather than afterwards: at .critical the
+        // machine is already in trouble, and a post-mortem is too late to be useful.
+        if sample.thermal == .critical, !warnedCriticalThisSession {
+            warnedCriticalThisSession = true
+            notify("Thermal state is CRITICAL while keeping awake. Consider turning Sleepless off.")
+        }
+    }
+
+    private func beginJournalSession() {
+        rotateJournalIfNeeded()
+        sessionStart = Date()
+        sessionSamples = []
+        warnedCriticalThisSession = false
+        recordSample("arm")
+    }
+
+    // Summarise what actually happened, and speak up only when something looks worth knowing.
+    // Silence here is the normal case and is itself a data point.
+    private func endJournalSession(reason: String) {
+        guard let start = sessionStart else { return }
+        recordSample("disarm")
+        let samples = sessionSamples
+        sessionStart = nil
+        sessionSamples = []
+        guard let worst = samples.max(by: { thermalRank($0.thermal) < thermalRank($1.thermal) }) else { return }
+
+        let duration = Int(Date().timeIntervalSince(start))
+        let closedSamples = samples.filter { $0.lidClosed }
+        let batteries = samples.map { $0.battery }
+        let onBatterySamples = samples.filter { !$0.onAC }
+        let drop = (batteries.first ?? 0) - (batteries.last ?? 0)
+
+        appendJournal([
+            "ev": "summary",
+            "t": Int(Date().timeIntervalSince1970),
+            "reason": reason,
+            "durationSec": duration,
+            "samples": samples.count,
+            "maxThermal": thermalName(worst.thermal),
+            "secondsHot": samples.filter { thermalRank($0.thermal) >= 2 }.count * Int(pollInterval),
+            "lidClosedSamples": closedSamples.count,
+            "onBatterySamples": onBatterySamples.count,
+            "batteryStart": batteries.first ?? -1,
+            "batteryEnd": batteries.last ?? -1,
+            "batteryDropPct": drop,
+        ])
+
+        // The risky shape is heat with the lid CLOSED — on a desk with the lid open, a warm
+        // Mac is just a working Mac. Report that combination, not heat on its own.
+        let hotAndClosed = samples.contains { thermalRank($0.thermal) >= 2 && $0.lidClosed }
+        if hotAndClosed {
+            notify("That session reached \(thermalName(worst.thermal)) heat with the lid closed. See `sleepless report`.")
+        } else if drop >= 25 && !onBatterySamples.isEmpty {
+            notify("That session used \(drop)% battery. See `sleepless report`.")
+        }
     }
 
     // MARK: - Keep-awake lease — the dead-man switch (Feature 5)
@@ -1143,6 +1322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // normal sleep directly rather than leaving the Mac awake for up to one watchdog tick.
     // The watchdog remains the backstop for the case this cannot cover — a crash.
     func applicationWillTerminate(_ notification: Notification) {
+        endJournalSession(reason: "quit")
         releaseLease()
         leaseTimer?.invalidate(); leaseTimer = nil
         if readSleepDisabled() { setDisableSleep(false) }

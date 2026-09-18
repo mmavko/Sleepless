@@ -265,6 +265,58 @@ JSON
 hook_check && ok "settings.local.json -> installed (args form)" || bad "missed the hook in settings.local.json"
 rm -f "$FAKE_HOME/.claude/settings.local.json"
 
+# --- session journal report ------------------------------------------------------------
+# The journal is instrumentation whose whole value is the conclusion it draws, so the
+# conclusion is what gets tested — especially that heat with the lid OPEN is not reported as
+# dangerous. A report that cried wolf on a warm Mac on a desk would be worse than none.
+echo
+echo "session journal report"
+
+JHOME="$TMP/jhome"; JDIR="$JHOME/Library/Application Support/Sleepless"
+mkdir -p "$JDIR"; JFILE="$JDIR/sessions.jsonl"
+report() { HOME="$JHOME" bash "$LEASE_SH" report 2>/dev/null; }
+summary() { # maxThermal lidClosedSamples onBatterySamples batteryDropPct
+  printf '{"ev":"summary","t":1,"reason":"switch","durationSec":3600,"samples":60,"maxThermal":"%s","secondsHot":60,"lidClosedSamples":%s,"onBatterySamples":%s,"batteryStart":90,"batteryEnd":50,"batteryDropPct":%s}\n' "$1" "$2" "$3" "$4"
+}
+
+rm -f "$JFILE"
+case "$(report)" in *"No session journal yet"*) ok "no journal          -> says so" ;; *) bad "missing journal not handled" ;; esac
+
+summary nominal 0 0 0 > "$JFILE"
+case "$(report)" in *"only untested"*) ok "never lid-closed    -> 'untested', not 'safe'" ;; *) bad "did not flag the untested case" ;; esac
+
+summary serious 0 60 18 > "$JFILE"
+out="$(report)"
+case "$out" in
+  *"Not yet evidence"*) ok "hot, lid OPEN       -> not flagged as dangerous" ;;
+  *) bad "hot-with-lid-open was misreported: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')" ;;
+esac
+
+summary critical 118 120 81 > "$JFILE"
+out="$(report)"
+case "$out" in
+  *"WITH THE LID CLOSED"*) ok "hot, lid CLOSED     -> flagged" ;;
+  *) bad "missed the one case that matters: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')" ;;
+esac
+
+# A corrupt line must never take the report down: it is the only view onto the corpus.
+printf 'not json\n{ broken\n' >> "$JFILE"
+if report >/dev/null 2>&1; then ok "malformed lines     -> survives" ; else bad "malformed journal crashed the report"; fi
+
+# Rotation keeps one generation; the report must read both.
+mv "$JFILE" "$JFILE.1"; : > "$JFILE"
+case "$(report)" in *"sessions recorded: 1"*) ok "rotated .1 file     -> included" ;; *) bad "rotated journal not read"; esac
+
+# The summary keys are written by App.swift and read by the report: a rename on one side
+# would silently produce an empty or wrong analysis. Same contract class as boot time.
+missing=""
+for key in maxThermal lidClosedSamples onBatterySamples batteryDropPct durationSec reason; do
+  grep -q "\"$key\"" "$REPO/App.swift" || missing="$missing App.swift:$key"
+  grep -q "$key" "$LEASE_SH" || missing="$missing sleepless:$key"
+done
+[ -z "$missing" ] && ok "summary keys agree across Swift and the report" \
+                   || bad "journal key contract broken:$missing"
+
 # --- boot time: the shell/Swift contract --------------------------------------------
 # The lease is keyed on boot time, and the app writes it with sysctlbyname("kern.boottime")
 # while the scripts parse sysctl(8) output. If those disagree by even one, every lease the

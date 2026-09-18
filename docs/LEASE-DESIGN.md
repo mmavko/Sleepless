@@ -131,7 +131,36 @@ hook is explicit and free.
 - **Clock jumps.** Wall-clock expiry with sanity bounds is good enough for a personal tool;
   the cost of being wrong is an early turn-off, not a drained battery.
 
-## Where thermal fits — last, and as a lease-shortener
+## Thermal: measure before enforcing
+
+Built as instrumentation rather than a safety net, and the reasoning is the point.
+
+Every other net in this app has an *obvious* threshold: the battery floor is a number you pick,
+the timer is a duration you choose, Low Power Mode is a boolean the OS hands you. Thermal has
+none. "Trip at `.serious`" is a guess, and a guessed threshold in a safety net is worse than no
+net at all — it fires when it shouldn't, teaching you to ignore it, and when it stays quiet you
+believe you are protected without evidence.
+
+So the app records instead: thermal state, battery, power source, lid position and Low Power
+Mode, sampled on the 60s poll and on every thermal transition, appended as JSONL to
+`~/Library/Application Support/Sleepless/sessions.jsonl` with a summary per session.
+`sleepless report` reads the corpus back.
+
+Two properties the report is built around:
+
+- **Only heat with the lid CLOSED counts.** A warm Mac on a desk is a working Mac; the risky
+  shape is a Mac cooking in a bag. Flagging the first would train you to ignore the second.
+- **It never concludes "safe".** With no lid-closed sessions on record it says *untested*,
+  because that corpus is silent about the only case that matters.
+
+The single exception to reporting after the fact is `.critical`, which is notified immediately:
+at that point the machine is already in trouble and a post-mortem is too late.
+
+**When it becomes a real net**, the design below still holds — the watchdog already ticks every
+30s with the authority to clear the flag, so thermal becomes *"shorten the lease"* rather than a
+new mechanism. The difference is that its numbers will come from the corpus instead of guesswork.
+
+### The original plan, for when that day comes
 
 The AI proposal that started this led with `ProcessInfo.thermalState`. It's a real signal, but
 it's the wrong centrepiece: your app isn't generating the heat, and its only lever — sleep the
@@ -152,7 +181,7 @@ Which is why it's step 5, not step 1.
 2. ~~GUI writes and renews the lease; refuses to arm without a loaded watchdog.~~ **Done.**
 3. ~~CLI.~~ **Done** — `sleepless extend | status | off | release`.
 4. ~~Claude Code hook wiring.~~ **Done** — one `PreToolUse` hook, see below.
-5. Thermal, as a lease-shortener. **Next.**
+5. Thermal — **instrumented, not enforced**. See below.
 
 Steps 1–2 are the whole safety argument. Everything after is convenience.
 

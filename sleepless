@@ -4,6 +4,7 @@
 #   sleepless extend [duration]   push the lease out to now + duration (never shortens)
 #   sleepless status              what the Mac is doing and why
 #   sleepless hook                is the Claude Code hook wired up? prints it if not
+#   sleepless report              what past keep-awake sessions actually did (heat, battery)
 #   sleepless off                 restore normal sleep now
 #   sleepless release             drop the lease only; the watchdog turns it off next tick
 #
@@ -175,6 +176,80 @@ HOOKEOF
   return 1
 }
 
+# The session journal is instrumentation, not a safety net. Thermal protection is the one
+# net whose thresholds we would be guessing at, so instead of guessing, the app records what
+# really happens and this reports it. The point of the report is to answer one question:
+# is there enough evidence yet to build the real thermal net, and with what numbers?
+JOURNAL="$SUPPORT_DIR/sessions.jsonl"
+
+cmd_report() {
+  /usr/bin/python3 - "$JOURNAL" <<'PY'
+import json, os, sys
+
+paths = [p for p in (sys.argv[1], sys.argv[1] + ".1") if os.path.exists(p)]
+if not paths:
+    print("No session journal yet. It is written while keep-awake is ON.")
+    print("Turn Sleepless on, use the Mac, turn it off — then run this again.")
+    sys.exit(0)
+
+summaries, samples = [], []
+for path in paths:
+    with open(path) as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            (summaries if row.get("ev") == "summary" else samples).append(row)
+
+if not summaries:
+    print("Journal exists but no completed sessions yet (%d raw samples)." % len(samples))
+    sys.exit(0)
+
+RANK = {"nominal": 0, "fair": 1, "serious": 2, "critical": 3}
+total_sec = sum(s.get("durationSec", 0) for s in summaries)
+hot = [s for s in summaries if RANK.get(s.get("maxThermal", "nominal"), 0) >= 2]
+# The risky shape is heat with the lid CLOSED. A warm Mac on a desk is just a working Mac.
+closed = [s for s in summaries if s.get("lidClosedSamples", 0) > 0]
+hot_closed = [s for s in hot if s.get("lidClosedSamples", 0) > 0]
+battery_sessions = [s for s in summaries if s.get("onBatterySamples", 0) > 0]
+
+print("Keep-awake sessions recorded: %d (%.1f h total)" % (len(summaries), total_sec / 3600.0))
+print("  with the lid closed at some point: %d" % len(closed))
+print("  on battery at some point:          %d" % len(battery_sessions))
+print("")
+print("Heat reached (max thermal state per session):")
+for name in ("nominal", "fair", "serious", "critical"):
+    n = sum(1 for s in summaries if s.get("maxThermal") == name)
+    if n:
+        print("  %-9s %d" % (name, n))
+
+if battery_sessions:
+    drops = sorted((s.get("batteryDropPct", 0) for s in battery_sessions), reverse=True)
+    print("")
+    print("Battery used per session on battery: worst %d%%, median %d%%"
+          % (drops[0], drops[len(drops) // 2]))
+
+print("")
+if hot_closed:
+    print("⚠️  %d session(s) got to serious/critical heat WITH THE LID CLOSED:" % len(hot_closed))
+    for s in sorted(hot_closed, key=lambda x: -RANK.get(x.get("maxThermal", "nominal"), 0))[:5]:
+        print("    %s for %d min, ended: %s"
+              % (s.get("maxThermal"), s.get("durationSec", 0) // 60, s.get("reason", "?")))
+    print("")
+    print("    This is the case a real thermal net would exist to catch. There is now")
+    print("    evidence to set its thresholds from, rather than guessing them.")
+elif hot:
+    print("Some sessions got warm, but never with the lid closed — that is a working Mac,")
+    print("not a Mac cooking in a bag. Not yet evidence for a thermal net.")
+else:
+    print("No session has reached serious heat yet.")
+    if not closed:
+        print("Note: no session has run with the lid closed, which is the only risky shape.")
+        print("Until that changes, this corpus cannot say the design is safe — only untested.")
+PY
+}
+
 cmd_status() {
   local state
   if flag_is_set; then
@@ -210,8 +285,9 @@ case "${1:-}" in
   off)     cmd_off ;;
   status)  cmd_status ;;
   hook)    cmd_hook ;;
+  report)  cmd_report ;;
   -h|--help|help)
     sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) echo "usage: sleepless extend [duration] | status | hook | off | release" >&2; exit 64 ;;
+  *) echo "usage: sleepless extend [duration] | status | hook | report | off | release" >&2; exit 64 ;;
 esac

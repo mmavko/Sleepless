@@ -61,8 +61,8 @@ rather than announcing a turn-off that never happened.
 
 ## Known gaps
 
-- **Thermal awareness isn't built.** Deliberately last — see the design note for why it
-  belongs in the watchdog as a lease-shortener rather than as its own mechanism.
+- **Thermal protection is instrumented, not enforced.** The app records what each keep-awake
+  session actually did and reports afterwards; it does not yet act on heat. See below.
 - **No thermal awareness.** Deliberately last; see the design note.
 - **Lid-close display sleep is untested on hardware.** Verify before trusting it in a bag.
 
@@ -123,6 +123,32 @@ tells you whether it's wired up, and `./install.sh` reminds you if it isn't.
 ```bash
 ./sleepless status
 ```
+
+## What actually happened: `sleepless report`
+
+Thermal protection is the one safety net whose thresholds would be **guessed**, and a guessed
+threshold is worse than none — it trips when it shouldn't and lends false confidence when it
+doesn't. So rather than act on heat, the app records it:
+
+```bash
+./sleepless report
+```
+
+Every keep-awake session appends to `~/Library/Application Support/Sleepless/sessions.jsonl`:
+thermal state, battery, power source, lid position and Low Power Mode, sampled each minute and
+on every thermal transition, plus a summary when the session ends. The report tells you whether
+there is yet enough evidence to build the real net, and with what numbers.
+
+Two things it deliberately does:
+
+- **It only flags heat with the lid closed.** A warm Mac on a desk is a working Mac. The risky
+  shape is heat in a closed bag, and a report that cried wolf on the first would be worse than
+  no report.
+- **It never says "safe".** If no session has run with the lid closed, it says the design is
+  *untested*, not safe — because that corpus cannot tell you anything about the case that matters.
+
+The one thing reported in the moment rather than afterwards is `.critical` thermal state, where
+a post-mortem is too late to be useful.
 
 ## Verify it yourself
 
