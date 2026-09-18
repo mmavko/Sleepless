@@ -732,7 +732,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Keep-awake lease — the dead-man switch (Feature 5)
     //
-    // Mirrors lease.sh exactly; that script is the reference writer and the two must agree
+    // Mirrors the `sleepless` CLI exactly; that script is the reference writer and the two must agree
     // byte for byte on the format, or the watchdog silently stops trusting our leases.
     private var leaseURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(leaseRelativePath)

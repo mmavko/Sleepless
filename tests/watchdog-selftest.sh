@@ -108,11 +108,11 @@ case "$msg" in
   *) bad "failed clear message unhelpful: $msg" ;;
 esac
 
-# --- lease.sh <-> watchdog.sh, end to end -------------------------------------------
+# --- sleepless CLI <-> watchdog.sh, end to end -------------------------------------------
 # Above, leases are hand-written. Here the real writer and the real reader meet, with a
 # throwaway HOME so the running machine's own lease is never touched. Real boot time on
 # both sides: a mismatch here is exactly the bug that would silently disable the watchdog.
-LEASE_SH="$REPO/lease.sh"
+LEASE_SH="$REPO/sleepless"
 FAKE_HOME="$TMP/home"
 mkdir -p "$FAKE_HOME"
 
@@ -127,22 +127,37 @@ tick_real_lease() {
 }
 
 echo
-echo "lease.sh <-> watchdog.sh"
+echo "sleepless CLI <-> watchdog.sh"
 
 lease release
 [ "$(tick_real_lease)" = "clear" ] && ok "no lease written        -> clear" || bad "no lease written -> should clear"
 
 lease extend 300
-[ "$(tick_real_lease)" = "keep" ] && ok "lease.sh extend 300     -> keep" || bad "live lease -> should keep"
+[ "$(tick_real_lease)" = "keep" ] && ok "sleepless extend 300    -> keep" || bad "live lease -> should keep"
 
 # extend is a floor, not an assignment: a short renewal must never cut a longer lease short.
 # Getting this backwards would let a 30s GUI tick silently truncate a 20-minute CLI lease.
 lease extend 5
-if HOME="$FAKE_HOME" bash "$LEASE_SH" show 2>/dev/null | grep -qE '29[0-9]s left|300s left'; then
+status_out="$(HOME="$FAKE_HOME" bash "$LEASE_SH" status 2>/dev/null || true)"
+if printf '%s' "$status_out" | grep -qE 'live, (29[0-9]|300)s left'; then
   ok "extend 5 does not shorten a 300s lease"
 else
-  bad "extend 5 shortened a longer lease: $(HOME="$FAKE_HOME" bash "$LEASE_SH" show 2>&1)"
+  bad "extend 5 shortened a longer lease: $(printf '%s' "$status_out" | tr '\n' ' ')"
 fi
+
+# Duration suffixes must all reach the same place as bare seconds.
+lease release; lease extend 2m
+if [ -n "$(HOME="$FAKE_HOME" bash -c '. "$1/leaselib.sh"; live_expiry' _ "$REPO")" ]; then
+  ok "extend accepts 2m as well as bare seconds"
+else
+  bad "extend 2m produced no live lease"
+fi
+for bad_d in bogus 5x -1 ""; do
+  if HOME="$FAKE_HOME" bash "$LEASE_SH" extend "$bad_d" >/dev/null 2>&1; then
+    [ -z "$bad_d" ] || bad "extend accepted bad duration '$bad_d'"
+  fi
+done
+ok "extend rejects malformed durations"
 
 lease release
 lease extend 1
@@ -151,7 +166,7 @@ sleep 2
 
 lease extend 300
 lease release
-[ "$(tick_real_lease)" = "clear" ] && ok "lease.sh release        -> clear" || bad "released lease -> should clear"
+[ "$(tick_real_lease)" = "clear" ] && ok "sleepless release       -> clear" || bad "released lease -> should clear"
 
 # The lease is per boot. One written under a different boot id must not hold the flag.
 lease extend 300

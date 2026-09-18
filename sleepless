@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# sleepless — command line for the keep-awake lease.
+#
+#   sleepless extend [duration]   push the lease out to now + duration (never shortens)
+#   sleepless status              what the Mac is doing and why
+#   sleepless off                 restore normal sleep now
+#   sleepless release             drop the lease only; the watchdog turns it off next tick
+#
+# Duration: bare seconds, or 90s / 20m / 2h. With no duration, `extend` reads the app's
+# "stop after N minutes of no tool calls" setting, so the UI stays the single source of truth.
+#
+# THIS IS THE HOOK COMMAND. A Claude Code PreToolUse hook running `sleepless extend` is the
+# whole integration: tool activity is the heartbeat, and its absence is the signal to stop.
+# See docs/LEASE-DESIGN.md.
+#
+# `extend` NEVER arms keep-awake, only prolongs it. Arming stays a deliberate act at the
+# menu-bar switch — otherwise any Claude session anywhere would silently disable your Mac's
+# sleep. The lease is INTENT, never state: writing one cannot keep the Mac awake, it only
+# tells the watchdog not to take it away yet.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=leaselib.sh
+. "$SCRIPT_DIR/leaselib.sh"
+
+BUNDLE_ID="com.aboudjem.Sleepless"
+FALLBACK_IDLE_MINUTES=20
+PMSET=/usr/bin/pmset
+
+# Quiet when piped (a hook shouldn't chatter into the transcript), chatty at a terminal.
+say() { [ -t 1 ] && printf '%s\n' "$*" || true; }
+
+# seconds | 90s | 20m | 2h  ->  seconds
+parse_duration() {
+  local raw="$1" n unit
+  n="${raw%[smh]}"; unit="${raw#"$n"}"
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  case "$unit" in
+    ''|s) echo "$n" ;;
+    m)    echo $((n * 60)) ;;
+    h)    echo $((n * 3600)) ;;
+    *)    return 1 ;;
+  esac
+}
+
+# The UI owns this number; the CLI just reads it. Unset/garbage falls back rather than failing:
+# a hook that errors out is noise, and the safety nets bound the damage either way.
+default_ttl_seconds() {
+  local minutes
+  minutes="$(defaults read "$BUNDLE_ID" idleTimeoutMinutes 2>/dev/null || true)"
+  case "$minutes" in
+    ''|*[!0-9]*) minutes="$FALLBACK_IDLE_MINUTES" ;;
+  esac
+  [ "$minutes" -ge 1 ] 2>/dev/null || minutes="$FALLBACK_IDLE_MINUTES"
+  echo $((minutes * 60))
+}
+
+flag_is_set() {
+  "$PMSET" -g 2>/dev/null | awk '
+    tolower($0) ~ /sleepdisabled/ { v = $NF }
+    END { exit (v == "1") ? 0 : 1 }'
+}
+
+cmd_extend() {
+  local ttl now target current
+  if [ -n "${1:-}" ]; then
+    ttl="$(parse_duration "$1")" || { echo "error: bad duration '$1' (use 90, 90s, 20m, 2h)" >&2; exit 64; }
+  else
+    ttl="$(default_ttl_seconds)"
+  fi
+  if [ "$ttl" -lt 1 ] || [ "$ttl" -gt "$MAX_LEASE_HORIZON" ]; then
+    echo "error: duration must be between 1s and ${MAX_LEASE_HORIZON}s" >&2; exit 64
+  fi
+
+  now="$(date +%s)"
+  target=$((now + ttl))
+  # A floor, not an assignment: a short renewal must never truncate a longer live lease.
+  # This is also what makes parallel Claude sessions work with ONE lease file and no
+  # locking — everyone extends, nobody releases, so it lapses after the last one goes quiet.
+  current="$(live_expiry)"
+  if [ -n "$current" ] && [ "$current" -gt "$target" ]; then target="$current"; fi
+
+  mkdir -p "$(dirname "$LEASE_FILE")"
+  local tmp; tmp="$(mktemp "$(dirname "$LEASE_FILE")/.lease.XXXXXX")"
+  trap 'rm -f "$tmp"' EXIT
+  printf 'version=%s\nexpires=%s\nboot=%s\n' "$LEASE_VERSION" "$target" "$(boot_time)" > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$LEASE_FILE"    # write-then-rename: never a half-written lease
+  trap - EXIT
+  say "lease held for $((target - now))s (until $(date -r "$target" '+%H:%M:%S'))"
+}
+
+cmd_release() {
+  rm -f "$LEASE_FILE"
+  say "lease released; the watchdog restores normal sleep within one tick"
+}
+
+cmd_off() {
+  rm -f "$LEASE_FILE"
+  if ! flag_is_set; then echo "already off; normal sleep is in effect"; return 0; fi
+  if /usr/bin/sudo -n "$PMSET" -a disablesleep 0 2>/dev/null; then
+    echo "off; normal sleep restored"
+  else
+    echo "error: couldn't clear disablesleep (is the grant installed? run ./grant.sh)" >&2
+    echo "       the lease is released, so the watchdog will clear it within one tick." >&2
+    exit 1
+  fi
+}
+
+cmd_status() {
+  local state
+  if flag_is_set; then
+    echo "keep-awake: ON  (lid close will not sleep this Mac)"
+  else
+    echo "keep-awake: off (normal sleep)"
+  fi
+
+  state="$(lease_state)"
+  case "$state" in
+    live\ *) echo "lease:      live, $(( ${state#live } - $(date +%s) ))s left" ;;
+    dead\ *) echo "lease:      none (${state#dead })" ;;
+  esac
+
+  if launchctl list com.aboudjem.Sleepless.watchdog >/dev/null 2>&1; then
+    echo "watchdog:   running"
+  else
+    echo "watchdog:   NOT RUNNING — a crash would leave this Mac awake until reboot"
+  fi
+  flag_is_set
+}
+
+case "${1:-}" in
+  extend)  cmd_extend "${2:-}" ;;
+  release) cmd_release ;;
+  off)     cmd_off ;;
+  status)  cmd_status ;;
+  -h|--help|help)
+    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *) echo "usage: sleepless extend [duration] | status | off | release" >&2; exit 64 ;;
+esac

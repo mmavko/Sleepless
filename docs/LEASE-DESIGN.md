@@ -89,7 +89,7 @@ and never eval'd** — a corrupt or hostile lease yields an empty field, which r
 live lease", which clears the flag. The failure direction is always toward sleeping.
 
 Written with write-then-rename so the watchdog can never read a half-written lease.
-`lease.sh` is the reference writer; the GUI and CLI will write the same format directly.
+`sleepless` (the CLI) is the reference writer; the GUI writes the same format directly.
 
 ## Lease semantics
 
