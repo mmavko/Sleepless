@@ -1,3 +1,9 @@
+> **Preserved from upstream.** This is Adam Boudjemaa's original README for
+> [Aboudjem/Sleepless](https://github.com/Aboudjem/Sleepless) v1.2.7, kept verbatim except that
+> image and doc links now point at upstream so they still resolve. It describes **upstream**, not
+> this fork — the Homebrew cask, the badges and the comparison table do not apply here.
+> For this fork, see [README.md](README.md) and [docs/FORK.md](docs/FORK.md).
+
 <!-- Language switcher. Keep this row identical across every README.<lang>.md. -->
 <p align="center">
   <b>English</b> &nbsp;·&nbsp;
@@ -10,9 +16,9 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/hero-dark.gif">
-    <source media="(prefers-color-scheme: light)" srcset="assets/hero-light.gif">
-    <img alt="Sleepless: keep your Mac awake with the lid closed" src="assets/hero-light.gif" width="780">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Aboudjem/Sleepless/main/assets/hero-dark.gif">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Aboudjem/Sleepless/main/assets/hero-light.gif">
+    <img alt="Sleepless: keep your Mac awake with the lid closed" src="https://raw.githubusercontent.com/Aboudjem/Sleepless/main/assets/hero-light.gif" width="780">
   </picture>
 </p>
 
@@ -37,7 +43,7 @@
 </p>
 
 <p align="center">
-  <img alt="Sleepless demo: flip the switch, set an auto-off timer, drag the battery-floor slider" src="assets/demo.gif" width="760">
+  <img alt="Sleepless demo: flip the switch, set an auto-off timer, drag the battery-floor slider" src="https://raw.githubusercontent.com/Aboudjem/Sleepless/main/assets/demo.gif" width="760">
 </p>
 
 > [!NOTE]
@@ -113,7 +119,7 @@ shasum -a 256 -c SHA256SUMS
 gh attestation verify Sleepless-*.zip -R Aboudjem/Sleepless
 ```
 
-Full threat model, the App Store verdict, and the audit guide: [SECURITY.md](SECURITY.md) · [docs/AUDIT.md](docs/AUDIT.md).
+Full threat model, the App Store verdict, and the audit guide: [SECURITY.md](SECURITY.md) · [docs/AUDIT.md](https://github.com/Aboudjem/Sleepless/blob/main/docs/AUDIT.md).
 
 ## FAQ
 
@@ -150,7 +156,7 @@ Flip the switch off, or let the timer or battery floor do it, and normal sleep r
 <details>
 <summary><b>Why isn't it notarized?</b></summary>
 
-It is a personal open-source tool with no paid Apple Developer ID, so it is ad-hoc signed. Build from source to skip Gatekeeper, or use **Open Anyway** for the prebuilt app. The notarization steps are documented in [docs/AUDIT.md](docs/AUDIT.md).
+It is a personal open-source tool with no paid Apple Developer ID, so it is ad-hoc signed. Build from source to skip Gatekeeper, or use **Open Anyway** for the prebuilt app. The notarization steps are documented in [docs/AUDIT.md](https://github.com/Aboudjem/Sleepless/blob/main/docs/AUDIT.md).
 </details>
 
 ## Contributing
